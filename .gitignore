@@ -43,3 +43,7 @@ black-checkstyle.xml
 black-diff.txt
 flake8.txt
 mypy.txt
+
+# logs
+logs/
+*.log
