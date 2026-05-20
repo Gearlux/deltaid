@@ -5,7 +5,7 @@ Semantic-segmentation models and adapters for the [Marainer](https://github.com/
 Deltaid provides a thin, Confluid-configurable wrapper around
 [`segmentation_models_pytorch`](https://github.com/qubvel/segmentation_models.pytorch)
 so segmentation models plug into the **unchanged** base
-`marainer.trainer.Trainer` — no subclassing, no overridden step functions, no
+`marainer.trainer.LightningTrainer` — no subclassing, no overridden step functions, no
 custom Lightning module. The Trainer's standard
 `preds = self(batch.input); loss = self.loss_fn(preds, batch.target)` flow
 fits segmentation natively.
@@ -49,7 +49,7 @@ train_loader: !class:torch.utils.data.DataLoader
   shuffle: true
   collate_fn: !ref:deltaid.segmentation.segmentation_collate_fn
 
-trainer: !class:marainer.trainer.Trainer
+trainer: !class:marainer.trainer.LightningTrainer
   experiment_name: my_segmentation
   run_name: deeplabv3plus_resnet34
   model: !ref:model
@@ -94,7 +94,7 @@ Any encoder name supported by smp works (`resnet50`, `efficientnet-b0`,
 |--------|---------|
 | `SegmentationLoss` | `nn.CrossEntropyLoss` wrapped for Confluid configuration; supports `class_weights` and `ignore_index`. |
 | `segmentation_collate_fn` | DataLoader collate that stacks per-sample image / mask tensors and preserves per-sample metadata as a list (the default collate crashes on string-valued metadata). |
-| `load_lightning_checkpoint` | Strip Lightning's `"model."` prefix when loading a `.ckpt` saved through `marainer.trainer.Trainer`. |
+| `load_lightning_checkpoint` | Strip Lightning's `"model."` prefix when loading a `.ckpt` saved through `marainer.trainer.LightningTrainer`. |
 
 Most torchmetrics segmentation metrics
 (`MulticlassJaccardIndex`, `MulticlassF1Score`, ...) accept logits directly
