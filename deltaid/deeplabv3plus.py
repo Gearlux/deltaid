@@ -2,7 +2,7 @@
 
 Wraps :class:`segmentation_models_pytorch.DeepLabV3Plus` (smp) into a plain
 :class:`torch.nn.Module` whose ``forward(images) -> logits`` signature plugs
-straight into the **unchanged** base :class:`marainer.trainer.Trainer`. Marainer
+straight into the **unchanged** base :class:`marainer.trainer.LightningTrainer`. Marainer
 already calls ``preds = self(batch.input)`` and
 ``loss = self.loss_fn(preds, batch.target)`` — for segmentation that's all the
 glue we need. No bundled batch type, no step-output dict, no per-mode forward
