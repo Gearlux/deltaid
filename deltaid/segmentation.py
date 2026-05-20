@@ -1,5 +1,5 @@
 """Generic semantic-segmentation adapters that plug into Marainer's
-:class:`~marainer.trainer.Trainer`.
+:class:`~marainer.trainer.LightningTrainer`.
 
 Segmentation is a much simpler fit for the base Trainer than detection: a
 segmentation model takes ``[N, 3, H, W]`` images and emits ``[N, C, H, W]``
