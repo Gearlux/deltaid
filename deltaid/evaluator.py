@@ -30,13 +30,13 @@ Minimal YAML example::
 from typing import Any, Optional
 
 import pytorch_lightning as L
+from confluid import Class, Lazy, configurable
+from marainer.evaluator import LightningEvaluator
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
 
-from confluid import Class, Lazy, configurable
 from deltaid.segmentation import segmentation_collate_fn
 from deltaid.trainer import _default_segmentation_metrics
-from marainer.evaluator import LightningEvaluator
 
 
 @configurable
@@ -78,9 +78,7 @@ class LightningSegmentationEvaluator(LightningEvaluator):
         run_name: str = "evaluate",
         metrics_sidecar_path: Optional[str] = None,
     ) -> None:
-        metrics: MetricCollection = _default_segmentation_metrics(
-            num_classes, ignore_index
-        ).clone(prefix="test/")
+        metrics: MetricCollection = _default_segmentation_metrics(num_classes, ignore_index).clone(prefix="test/")
         super().__init__(
             model=model,
             dataset=dataset,

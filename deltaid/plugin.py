@@ -9,8 +9,9 @@ exposing:
 * ``marainer segmentation evaluate`` — alias to :func:`deltaid.cli.evaluate`
 """
 
-from deltaid.cli import evaluate, train
 from liquifai import LiquifyApp
+
+from deltaid.cli import evaluate, train
 
 
 def register(app: LiquifyApp) -> None:

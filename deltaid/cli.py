@@ -8,10 +8,11 @@ to ``marainer segmentation train`` / ``marainer segmentation evaluate``
 
 import sys
 
-from deltaid.evaluator import LightningSegmentationEvaluator
-from deltaid.trainer import LightningSegmentationTrainer
 from liquifai import LiquifyApp
 from logflow import get_logger
+
+from deltaid.evaluator import LightningSegmentationEvaluator
+from deltaid.trainer import LightningSegmentationTrainer
 
 logger = get_logger(__name__)
 

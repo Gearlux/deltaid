@@ -24,10 +24,9 @@ waivefront op chain emits — see :func:`segmentation_collate_fn` below.
 from typing import Any, Dict, List
 
 import torch
-from torch import Tensor
-
 from dataflux.sample import Sample
 from logflow import get_logger
+from torch import Tensor
 
 logger = get_logger(__name__)
 
@@ -61,8 +60,7 @@ def segmentation_collate_fn(batch: List[Sample]) -> Sample:
     for s in batch:
         if not isinstance(s.input, Tensor):
             raise TypeError(
-                f"segmentation_collate_fn expects sample.input to be a torch.Tensor; "
-                f"got {type(s.input).__name__}."
+                f"segmentation_collate_fn expects sample.input to be a torch.Tensor; " f"got {type(s.input).__name__}."
             )
         if not isinstance(s.target, Tensor):
             raise TypeError(

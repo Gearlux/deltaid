@@ -6,13 +6,13 @@ from typing import Any, Dict, List
 import pytorch_lightning as L
 import torch
 import torch.nn as nn
+from confluid import Class
+from dataflux.core import Flux
+from dataflux.sample import Sample
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score
 
-from confluid import Class
-from dataflux.core import Flux
-from dataflux.sample import Sample
 from deltaid.evaluator import LightningSegmentationEvaluator
 from deltaid.segmentation import segmentation_collate_fn
 
@@ -76,9 +76,7 @@ def test_metrics_have_test_prefix() -> None:
         num_classes=2,
     )
     keys = list(ev.metrics.keys())  # type: ignore[union-attr]
-    assert all(
-        k.startswith("test/") for k in keys
-    ), f"Expected test/ prefix, got: {keys}"
+    assert all(k.startswith("test/") for k in keys), f"Expected test/ prefix, got: {keys}"
     assert "test/miou" in keys
     assert "test/dice_macro" in keys
 
@@ -141,9 +139,7 @@ def test_user_can_override_metrics_with_torchmetrics_class() -> None:
         dataset=_make_flux(8),
         num_classes=2,
     )
-    custom = MetricCollection(
-        {"test/f1_only": MulticlassF1Score(num_classes=2, average="macro")}
-    )
+    custom = MetricCollection({"test/f1_only": MulticlassF1Score(num_classes=2, average="macro")})
     ev.metrics = custom
     batch = Sample(
         input=torch.randn(4, 3, 8, 8),

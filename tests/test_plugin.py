@@ -1,7 +1,8 @@
 """Tests for the deltaid marainer plugin registration."""
 
-from deltaid.plugin import register
 from liquifai import LiquifyApp
+
+from deltaid.plugin import register
 
 
 def test_register_mounts_segmentation_subapp() -> None:
