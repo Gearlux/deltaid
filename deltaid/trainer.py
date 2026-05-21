@@ -51,18 +51,16 @@ from typing import Any, Optional
 import pytorch_lightning as L
 import torch
 import torch.nn as nn
+from confluid import Class, Lazy, configurable
+from marainer.trainer import LightningTrainer
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 
-from confluid import Class, Lazy, configurable
 from deltaid.segmentation import segmentation_collate_fn
-from marainer.trainer import LightningTrainer
 
 
-def _default_segmentation_metrics(
-    num_classes: int, ignore_index: int
-) -> MetricCollection:
+def _default_segmentation_metrics(num_classes: int, ignore_index: int) -> MetricCollection:
     """Build the deltaid default segmentation metric pair from torchmetrics.
 
     No deltaid-owned wrapper: returns a stock :class:`MetricCollection` of

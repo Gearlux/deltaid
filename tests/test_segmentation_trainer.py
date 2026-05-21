@@ -2,10 +2,10 @@
 
 import torch
 import torch.nn as nn
+from dataflux.sample import Sample
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 
-from dataflux.sample import Sample
 from deltaid.segmentation import segmentation_collate_fn
 from deltaid.trainer import LightningSegmentationTrainer, _default_segmentation_metrics
 
@@ -25,9 +25,7 @@ class _TinySegmenter(nn.Module):
         return self.head(x)  # type: ignore[no-any-return]
 
 
-def _make_samples(
-    n: int = 8, num_classes: int = 2, h: int = 8, w: int = 8
-) -> list[Sample]:
+def _make_samples(n: int = 8, num_classes: int = 2, h: int = 8, w: int = 8) -> list[Sample]:
     return [
         Sample(
             input=torch.randn(3, h, w),
@@ -109,15 +107,9 @@ def test_metrics_are_wired_with_correct_prefixes() -> None:
     train_keys = [str(k) for k in trainer.train_metrics.keys()]
     val_keys = [str(k) for k in trainer.val_metrics.keys()]
     test_keys = [str(k) for k in trainer.test_metrics.keys()]
-    assert all(
-        k.startswith("train/") for k in train_keys
-    ), f"Expected train/ prefix, got: {train_keys}"
-    assert all(
-        k.startswith("val/") for k in val_keys
-    ), f"Expected val/ prefix, got: {val_keys}"
-    assert all(
-        k.startswith("test/") for k in test_keys
-    ), f"Expected test/ prefix, got: {test_keys}"
+    assert all(k.startswith("train/") for k in train_keys), f"Expected train/ prefix, got: {train_keys}"
+    assert all(k.startswith("val/") for k in val_keys), f"Expected val/ prefix, got: {val_keys}"
+    assert all(k.startswith("test/") for k in test_keys), f"Expected test/ prefix, got: {test_keys}"
     assert "train/miou" in train_keys
     assert "train/dice_macro" in train_keys
 
@@ -196,9 +188,7 @@ def test_user_can_override_loss_fn_with_any_upstream_class() -> None:
         train_set=_make_samples(8),
         num_classes=2,
     )
-    weighted_ce = nn.CrossEntropyLoss(
-        weight=torch.tensor([1.0, 5.0]), ignore_index=-100
-    )
+    weighted_ce = nn.CrossEntropyLoss(weight=torch.tensor([1.0, 5.0]), ignore_index=-100)
     trainer.loss_fn = weighted_ce
     batch = _make_batch(n=4, num_classes=2)
     # Confirm the step uses the overridden loss without raising.
