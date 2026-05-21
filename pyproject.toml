@@ -27,6 +27,12 @@ dev = [
     "pytest-cov>=4.0.0,<7.0.0",
 ]
 
+[project.scripts]
+deltaid = "deltaid.cli:main"
+
+[project.entry-points."marainer.commands"]
+deltaid = "deltaid.plugin:register"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["deltaid*"]
