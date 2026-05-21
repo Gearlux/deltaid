@@ -39,11 +39,11 @@ from typing import Optional, cast
 import segmentation_models_pytorch as smp
 import torch
 import torch.nn as nn
-from confluid import configurable
-from logflow import get_logger
 from torch import Tensor
 
+from confluid import configurable
 from deltaid.checkpoint import load_lightning_checkpoint
+from logflow import get_logger
 
 logger = get_logger(__name__)
 
@@ -138,11 +138,14 @@ class DeepLabV3PlusModel(nn.Module):
             ``[N, num_classes, H, W]`` raw logits.
         """
         if images.dim() != 4:
-            raise ValueError(f"DeepLabV3PlusModel expects 4D [N,C,H,W] images, got shape {tuple(images.shape)}.")
+            raise ValueError(
+                f"DeepLabV3PlusModel expects 4D [N,C,H,W] images, got shape {tuple(images.shape)}."
+            )
         n, c, h, w = images.shape
         if c != self.in_channels:
             raise ValueError(
-                f"DeepLabV3PlusModel was built for in_channels={self.in_channels}, " f"got images with {c} channels."
+                f"DeepLabV3PlusModel was built for in_channels={self.in_channels}, "
+                f"got images with {c} channels."
             )
         if h % 32 != 0 or w % 32 != 0:
             raise ValueError(

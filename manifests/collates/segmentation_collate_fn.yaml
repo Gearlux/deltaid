@@ -1,7 +1,0 @@
-description: "Per-batch collate that stacks image + segmentation-mask tensors."
-use_case: "Pass to torch.utils.data.DataLoader.collate_fn for any deltaid segmentation pipeline. Outputs Sample(input=stacked images, target=stacked masks, metadata=per_sample list)."
-category: "Segmentation"
-flux_type: "Callable"
-task: "semantic_segmentation"
-class_path: "deltaid.segmentation.segmentation_collate_fn"
-params: {}
