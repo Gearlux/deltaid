@@ -6,8 +6,6 @@ to ``marainer segmentation train`` / ``marainer segmentation evaluate``
 (which are registered via the marainer plugin in :mod:`deltaid.plugin`).
 """
 
-import sys
-
 from liquifai import LiquifyApp
 from logflow import get_logger
 
@@ -15,9 +13,6 @@ from deltaid.evaluator import LightningSegmentationEvaluator
 from deltaid.trainer import LightningSegmentationTrainer
 
 logger = get_logger(__name__)
-
-if "." not in sys.path:
-    sys.path.insert(0, ".")
 
 app = LiquifyApp(name="deltaid", description="Deltaid semantic-segmentation commands")
 
