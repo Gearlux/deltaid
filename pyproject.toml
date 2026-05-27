@@ -33,6 +33,9 @@ deltaid = "deltaid.cli:main"
 [project.entry-points."marainer.commands"]
 deltaid = "deltaid.plugin:register"
 
+[project.entry-points."confluid.configurables"]
+deltaid = "deltaid"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["deltaid*"]
