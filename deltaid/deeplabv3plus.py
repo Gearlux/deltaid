@@ -48,7 +48,7 @@ from deltaid.checkpoint import load_lightning_checkpoint
 logger = get_logger(__name__)
 
 
-@configurable
+@configurable(category="segmentation_model")
 class DeepLabV3PlusModel(nn.Module):
     """DeepLabV3+ segmentation model wrapped for the Marainer Trainer flow.
 

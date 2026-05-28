@@ -80,6 +80,8 @@ marainer train waivefront-rfuav/config/train_deeplabv3plus.yaml
 
 ## Models
 
+> `DeepLabV3PlusModel` is tagged `@configurable(category="segmentation_model")`, so navigaitor's `list_configurable_classes(category="segmentation_model")` and the visual-editor form-spec surface it as a segmentation-model option.
+
 | Class | smp backbone | Notes |
 |-------|--------------|-------|
 | `DeepLabV3PlusModel` | `smp.DeepLabV3Plus` | ASPP + decoder, default `resnet34` encoder |
