@@ -101,6 +101,15 @@ Most torchmetrics segmentation metrics
 and emit a scalar — they wire into `val_metrics` straight from YAML, no
 adapter needed.
 
+## Inherited from marainer
+
+`LightningSegmentationTrainer` subclasses `marainer.trainer.LightningTrainer`,
+so segmentation runs automatically get marainer's default `ModelCheckpoint`
+(`save_last=True` + best by the first val metric) and YAML-config artifact
+logging to every wired Lightning logger. Use `marainer.loggers.Marainer*Logger`
+with `log_all_checkpoints: true` to archive every checkpoint per logger.
+See marainer's README → *Default checkpointing* for details.
+
 ## Dependencies
 
 | Package | Purpose |
