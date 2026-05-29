@@ -39,7 +39,7 @@ from deltaid.segmentation import segmentation_collate_fn
 from deltaid.trainer import _default_segmentation_metrics
 
 
-@configurable
+@configurable(task="segmentation", role="evaluator")
 class LightningSegmentationEvaluator(LightningEvaluator):
     """Specialised semantic-segmentation evaluator with baked-in defaults.
 

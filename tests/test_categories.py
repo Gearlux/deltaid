@@ -17,3 +17,18 @@ def test_segmentation_model_tagged() -> None:
 
 def test_category_enumerable_via_registry() -> None:
     assert "DeepLabV3PlusModel" in get_registry().list_classes(category="segmentation_model")
+
+
+def test_task_role_tags() -> None:
+    """task/role drive navigaitor's scan-and-generate task surfaces."""
+    from deltaid.evaluator import LightningSegmentationEvaluator
+    from deltaid.trainer import LightningSegmentationTrainer
+
+    assert DeepLabV3PlusModel.__confluid_task__ == "segmentation"
+    assert DeepLabV3PlusModel.__confluid_role__ == "model"
+    assert LightningSegmentationTrainer.__confluid_task__ == "segmentation"
+    assert LightningSegmentationTrainer.__confluid_role__ == "trainer"
+    assert LightningSegmentationEvaluator.__confluid_role__ == "evaluator"
+    registry = get_registry()
+    assert "DeepLabV3PlusModel" in registry.list_classes(task="segmentation", role="model")
+    assert "LightningSegmentationTrainer" in registry.list_classes(task="segmentation", role="trainer")
