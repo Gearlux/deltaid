@@ -52,6 +52,7 @@ import pytorch_lightning as L
 import torch
 import torch.nn as nn
 from confluid import Class, Lazy, configurable
+from confluid.fluid import Lazy as _LazyFluid  # the deferred-Fluid class (not the Lazy[T] annotation)
 from marainer.trainer import LightningTrainer
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
@@ -84,7 +85,24 @@ def _default_segmentation_metrics(num_classes: int, ignore_index: int) -> Metric
     )
 
 
-@configurable
+def _deferred_segmentation_metrics(prefix: str, ignore_index: int) -> Any:
+    """A deferred ``MetricCollection`` whose ``num_classes`` is injected from the
+    dataset at run time (``marainer.dimensions``). Used when ``num_classes`` is
+    omitted; ``ignore_index`` is baked in here since it's known at construction.
+    """
+    return _LazyFluid(
+        MetricCollection,
+        metrics={
+            "miou": Class(MulticlassJaccardIndex, average="macro", ignore_index=ignore_index),
+            "dice_macro": Class(
+                MulticlassF1Score, average="macro", ignore_index=ignore_index, multidim_average="global"
+            ),
+        },
+        prefix=prefix,
+    )
+
+
+@configurable(task="segmentation", role="trainer")
 class LightningSegmentationTrainer(LightningTrainer):
     """Specialised semantic-segmentation trainer with baked-in defaults.
 
@@ -92,7 +110,9 @@ class LightningSegmentationTrainer(LightningTrainer):
         model: Segmentation model that emits ``[N, num_classes, H, W]`` logits.
         train_set: Training dataset or Flux pipeline.
         num_classes: Number of output classes including background; drives
-            metric construction.
+            metric construction. Optional — omit it to derive the count from
+            the dataset at run time (metrics built deferred, ``num_classes``
+            injected by ``marainer.dimensions``); provide it to build eagerly.
         val_set: Validation dataset or Flux pipeline.
         test_set: Held-out test dataset (triggers ``lightning.test()`` after fit).
         ignore_index: Pixel value in ``target`` that contributes zero loss
@@ -117,7 +137,7 @@ class LightningSegmentationTrainer(LightningTrainer):
         self,
         model: Any,
         train_set: Any,
-        num_classes: int,
+        num_classes: Optional[int] = None,
         val_set: Any = None,
         test_set: Any = None,
         ignore_index: int = -100,
@@ -142,10 +162,18 @@ class LightningSegmentationTrainer(LightningTrainer):
             experiment_name=experiment_name,
             run_name=run_name,
         )
-        self.num_classes = int(num_classes)
+        self.num_classes = int(num_classes) if num_classes is not None else None
         self.ignore_index = int(ignore_index)
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=self.ignore_index)
-        base = _default_segmentation_metrics(self.num_classes, self.ignore_index)
-        self.train_metrics: Optional[MetricCollection] = base.clone(prefix="train/")
-        self.val_metrics: Optional[MetricCollection] = base.clone(prefix="val/")
-        self.test_metrics: Optional[MetricCollection] = base.clone(prefix="test/")
+        if num_classes is not None:
+            base = _default_segmentation_metrics(int(num_classes), self.ignore_index)
+            self.train_metrics: Any = base.clone(prefix="train/")
+            self.val_metrics: Any = base.clone(prefix="val/")
+            self.test_metrics: Any = base.clone(prefix="test/")
+        else:
+            # num_classes omitted -> derived from the dataset at run time; the
+            # base trainer's run() flows these deferred collections, injecting
+            # the derived count (marainer.dimensions).
+            self.train_metrics = _deferred_segmentation_metrics("train/", self.ignore_index)
+            self.val_metrics = _deferred_segmentation_metrics("val/", self.ignore_index)
+            self.test_metrics = _deferred_segmentation_metrics("test/", self.ignore_index)
