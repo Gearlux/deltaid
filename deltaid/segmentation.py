@@ -37,7 +37,7 @@ def segmentation_collate_fn(batch: List[Sample]) -> Sample:
     Each input ``Sample`` is expected to carry:
 
     * ``sample.input`` — ``[3, H, W]`` float tensor (e.g. produced by
-      :class:`waivefront.segmentation_ops.SignalRegionsToSegmentationTargetOp`).
+      :class:`waivefront.targets.RegionsToSegmentationMaskOp`).
     * ``sample.target`` — ``[H, W]`` int64 class-id mask.
 
     The returned :class:`~dataflux.sample.Sample` has:
@@ -50,7 +50,7 @@ def segmentation_collate_fn(batch: List[Sample]) -> Sample:
 
     All per-sample tensors must already share the same spatial dims; mixed
     sizes must be resized upstream (e.g. via Waivefront's
-    :class:`~waivefront.visualizers.RenderSpectrogramImageOp`).
+    :class:`~dataflux.ops.image.ConvertToImageOp`).
     """
     if not batch:
         raise ValueError("segmentation_collate_fn received an empty batch.")
