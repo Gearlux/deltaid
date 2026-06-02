@@ -44,7 +44,7 @@ loss_fn: !class:deltaid.segmentation.SegmentationLoss
 val_metrics: !class:torchmetrics.classification.MulticlassJaccardIndex
   num_classes: 2
 
-train_loader: !class:torch.utils.data.DataLoader
+train_loader: !lazy:torch.utils.data.DataLoader
   batch_size: 8
   shuffle: true
   collate_fn: !ref:deltaid.segmentation.segmentation_collate_fn
