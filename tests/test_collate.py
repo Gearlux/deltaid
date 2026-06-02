@@ -29,7 +29,7 @@ def test_collate_preserves_string_metadata_as_list() -> None:
     """Strings can't be torch.stack'd — they MUST end up in a per_sample list."""
     batch = [_make_sample(0), _make_sample(1)]
     result = segmentation_collate_fn(batch)
-    metas = result.metadata["per_sample"]
+    metas = result.meta["per_sample"]
     assert isinstance(metas, list)
     assert len(metas) == 2
     assert metas[0]["pack_id"] == "pack0"
@@ -53,7 +53,7 @@ def test_collate_handles_empty_metadata_dict() -> None:
         metadata={},
     )
     result = segmentation_collate_fn([s])
-    assert result.metadata["per_sample"] == [{}]
+    assert result.meta["per_sample"] == [{}]
 
 
 def test_collate_rejects_empty_batch() -> None:
