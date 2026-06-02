@@ -69,7 +69,7 @@ def segmentation_collate_fn(batch: List[Sample]) -> Sample:
             )
         images.append(s.input)
         targets.append(s.target.long() if s.target.dtype != torch.int64 else s.target)
-        metas.append(s.metadata)
+        metas.append(s.meta)  # per-sample dict (the batch nests the list under metadata["per_sample"])
 
     return Sample(
         input=torch.stack(images),
