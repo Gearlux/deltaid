@@ -27,13 +27,11 @@ Minimal YAML example::
       dataset: !ref:val_set
 """
 
-from typing import Any, Optional
+from typing import Any
 
-import pytorch_lightning as L
-from confluid import Class, Lazy, configurable
+from confluid import LazyClass, configurable
 from marainer.evaluator import LightningEvaluator
 from torch.utils.data import DataLoader
-from torchmetrics import MetricCollection
 
 from deltaid.segmentation import segmentation_collate_fn
 from deltaid.trainer import _default_segmentation_metrics
@@ -42,6 +40,14 @@ from deltaid.trainer import _default_segmentation_metrics
 @configurable(task="segmentation", role="evaluator")
 class LightningSegmentationEvaluator(LightningEvaluator):
     """Specialised semantic-segmentation evaluator with baked-in defaults.
+
+    Mirrors :class:`~marainer.evaluator.LightningEvaluator`'s minimal-ctor
+    discipline: only ``model`` / ``dataset`` / ``num_classes`` (+ identity
+    ``ignore_index`` / ``experiment_name`` / ``run_name``). The ``test/`` metric
+    set and the ``segmentation_collate_fn`` loader are body attributes;
+    ``predictions_sink`` / ``lightning`` / ``metrics_sidecar_path`` inherit the
+    base defaults and are configured post-construction (YAML / broadcasting; a
+    deferred slot uses ``!lazy:``).
 
     Args:
         model: Segmentation model that emits ``[N, num_classes, H, W]`` logits.
@@ -54,15 +60,8 @@ class LightningSegmentationEvaluator(LightningEvaluator):
             accumulation. Propagates to every default metric. When the user
             overrides ``metrics`` via YAML, the upstream class is responsible
             for its own ``ignore_index``.
-        loader: Deferred DataLoader (default includes
-            ``segmentation_collate_fn``).
-        predictions_sink: Optional sink with ``.write(prediction, metadata)``
-            and ``.close()``.
-        lightning: PyTorch Lightning Trainer config.
         experiment_name: MLflow experiment name.
         run_name: MLflow run name.
-        metrics_sidecar_path: Optional path; when set, writes a logger-agnostic
-            JSON dump of the final metrics after evaluation completes.
     """
 
     def __init__(
@@ -71,24 +70,11 @@ class LightningSegmentationEvaluator(LightningEvaluator):
         dataset: Any,
         num_classes: int,
         ignore_index: int = -100,
-        loader: Lazy[Any] = Class(DataLoader, collate_fn=segmentation_collate_fn),
-        predictions_sink: Any = None,
-        lightning: Any = Class(L.Trainer),
         experiment_name: str = "deltaid_segmentation_eval",
         run_name: str = "evaluate",
-        metrics_sidecar_path: Optional[str] = None,
     ) -> None:
-        metrics: MetricCollection = _default_segmentation_metrics(num_classes, ignore_index).clone(prefix="test/")
-        super().__init__(
-            model=model,
-            dataset=dataset,
-            loader=loader,
-            metrics=metrics,
-            predictions_sink=predictions_sink,
-            lightning=lightning,
-            experiment_name=experiment_name,
-            run_name=run_name,
-            metrics_sidecar_path=metrics_sidecar_path,
-        )
+        super().__init__(model=model, dataset=dataset, experiment_name=experiment_name, run_name=run_name)
         self.num_classes = int(num_classes)
         self.ignore_index = int(ignore_index)
+        self.metrics = _default_segmentation_metrics(self.num_classes, self.ignore_index).clone(prefix="test/")
+        self.loader = LazyClass(DataLoader, collate_fn=segmentation_collate_fn)

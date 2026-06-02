@@ -48,11 +48,9 @@ Override with an upstream-library loss (no deltaid wrapper needed)::
 
 from typing import Any, Optional
 
-import pytorch_lightning as L
 import torch
 import torch.nn as nn
-from confluid import Class, Lazy, configurable
-from confluid.fluid import Lazy as _LazyFluid  # the deferred-Fluid class (not the Lazy[T] annotation)
+from confluid import LazyClass, configurable
 from marainer.trainer import LightningTrainer
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
@@ -85,50 +83,30 @@ def _default_segmentation_metrics(num_classes: int, ignore_index: int) -> Metric
     )
 
 
-def _deferred_segmentation_metrics(prefix: str, ignore_index: int) -> Any:
-    """A deferred ``MetricCollection`` whose ``num_classes`` is injected from the
-    dataset at run time (``marainer.dimensions``). Used when ``num_classes`` is
-    omitted; ``ignore_index`` is baked in here since it's known at construction.
-    """
-    return _LazyFluid(
-        MetricCollection,
-        metrics={
-            "miou": Class(MulticlassJaccardIndex, average="macro", ignore_index=ignore_index),
-            "dice_macro": Class(
-                MulticlassF1Score, average="macro", ignore_index=ignore_index, multidim_average="global"
-            ),
-        },
-        prefix=prefix,
-    )
-
-
 @configurable(task="segmentation", role="trainer")
 class LightningSegmentationTrainer(LightningTrainer):
     """Specialised semantic-segmentation trainer with baked-in defaults.
+
+    Mirrors :class:`~marainer.trainer.LightningTrainer`'s minimal-ctor discipline:
+    only ``model`` / ``train_set`` (+ identity ``num_classes`` / ``ignore_index`` /
+    ``experiment_name`` / ``run_name``); the deferred ``optimizer`` /
+    ``train/val/test_loader`` (``segmentation_collate_fn``) / ``lightning`` slots
+    and the ``loss_fn`` + metric set are body attributes configured
+    post-construction (YAML / broadcasting; a deferred slot uses ``!lazy:``).
 
     Args:
         model: Segmentation model that emits ``[N, num_classes, H, W]`` logits.
         train_set: Training dataset or Flux pipeline.
         num_classes: Number of output classes including background; drives
-            metric construction. Optional — omit it to derive the count from
-            the dataset at run time (metrics built deferred, ``num_classes``
-            injected by ``marainer.dimensions``); provide it to build eagerly.
-        val_set: Validation dataset or Flux pipeline.
-        test_set: Held-out test dataset (triggers ``lightning.test()`` after fit).
+            metric construction. Provide it explicitly to build the metric set —
+            dataset-derived ``num_classes`` was removed with ``marainer.dimensions``
+            (TASKS follow-up: restore via an ``initialize()`` hook like sonair's).
         ignore_index: Pixel value in ``target`` that contributes zero loss
             and is skipped during metric accumulation. Propagates to both the
             default ``loss_fn`` and every default metric. When the user
             overrides ``loss_fn`` / ``*_metrics`` via YAML, those upstream
             classes are responsible for their own ``ignore_index``; this knob
             becomes a no-op for the overridden path.
-        optimizer: Deferred optimizer (default: AdamW lr=1e-4, wd=0.05).
-        train_loader: Deferred DataLoader (default includes
-            ``segmentation_collate_fn``).
-        val_loader: Deferred DataLoader (default includes
-            ``segmentation_collate_fn``).
-        test_loader: Deferred DataLoader (default includes
-            ``segmentation_collate_fn``).
-        lightning: PyTorch Lightning Trainer config.
         experiment_name: MLflow experiment name.
         run_name: MLflow run name.
     """
@@ -138,42 +116,26 @@ class LightningSegmentationTrainer(LightningTrainer):
         model: Any,
         train_set: Any,
         num_classes: Optional[int] = None,
-        val_set: Any = None,
-        test_set: Any = None,
         ignore_index: int = -100,
-        optimizer: Lazy[Any] = Class(torch.optim.AdamW, lr=1e-4, weight_decay=0.05),
-        train_loader: Lazy[Any] = Class(DataLoader, collate_fn=segmentation_collate_fn),
-        val_loader: Lazy[Any] = Class(DataLoader, collate_fn=segmentation_collate_fn),
-        test_loader: Lazy[Any] = Class(DataLoader, collate_fn=segmentation_collate_fn),
-        lightning: Any = Class(L.Trainer),
         experiment_name: str = "deltaid_segmentation",
         run_name: str = "train",
     ) -> None:
-        super().__init__(
-            model=model,
-            train_set=train_set,
-            val_set=val_set,
-            test_set=test_set,
-            optimizer=optimizer,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            test_loader=test_loader,
-            lightning=lightning,
-            experiment_name=experiment_name,
-            run_name=run_name,
-        )
+        super().__init__(model=model, train_set=train_set, experiment_name=experiment_name, run_name=run_name)
+        # Store config ONLY — no functional work. Deferred slots are LazyClass;
+        # the base run() flows them. Every slot is overridable post-construction.
         self.num_classes = int(num_classes) if num_classes is not None else None
         self.ignore_index = int(ignore_index)
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=self.ignore_index)
-        if num_classes is not None:
-            base = _default_segmentation_metrics(int(num_classes), self.ignore_index)
-            self.train_metrics: Any = base.clone(prefix="train/")
-            self.val_metrics: Any = base.clone(prefix="val/")
-            self.test_metrics: Any = base.clone(prefix="test/")
-        else:
-            # num_classes omitted -> derived from the dataset at run time; the
-            # base trainer's run() flows these deferred collections, injecting
-            # the derived count (marainer.dimensions).
-            self.train_metrics = _deferred_segmentation_metrics("train/", self.ignore_index)
-            self.val_metrics = _deferred_segmentation_metrics("val/", self.ignore_index)
-            self.test_metrics = _deferred_segmentation_metrics("test/", self.ignore_index)
+        self.optimizer = LazyClass(torch.optim.AdamW, lr=1e-4, weight_decay=0.05)
+        self.train_loader = LazyClass(DataLoader, collate_fn=segmentation_collate_fn)
+        self.val_loader = LazyClass(DataLoader, collate_fn=segmentation_collate_fn)
+        self.test_loader = LazyClass(DataLoader, collate_fn=segmentation_collate_fn)
+        if self.num_classes is not None:
+            base = _default_segmentation_metrics(self.num_classes, self.ignore_index)
+            self.train_metrics = base.clone(prefix="train/")
+            self.val_metrics = base.clone(prefix="val/")
+            self.test_metrics = base.clone(prefix="test/")
+        # When num_classes is omitted, metrics stay None (the base default). Set
+        # num_classes explicitly to enable segmentation metrics — dataset-derived
+        # num_classes was removed with marainer.dimensions (TASKS follow-up: restore
+        # via an initialize() hook mirroring sonair's classification trainer).

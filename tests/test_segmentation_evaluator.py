@@ -162,23 +162,20 @@ def test_evaluator_run_writes_metrics_sidecar(tmp_path: Any) -> None:
         model=_TinySegmenter(num_classes=2),
         dataset=_make_flux(8),
         num_classes=2,
-        loader=Class(
-            DataLoader,
-            batch_size=4,
-            collate_fn=segmentation_collate_fn,
-        ),
-        lightning=Class(
-            L.Trainer,
-            accelerator="cpu",
-            enable_progress_bar=False,
-            enable_model_summary=False,
-            logger=False,
-            default_root_dir=str(tmp_path),
-        ),
         experiment_name="seg_test_exp",
         run_name="seg_test_run",
-        metrics_sidecar_path=str(sidecar),
     )
+    # Minimal-ctor pattern: configure the deferred slots post-construction.
+    ev.loader = Class(DataLoader, batch_size=4, collate_fn=segmentation_collate_fn)
+    ev.lightning = Class(
+        L.Trainer,
+        accelerator="cpu",
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        logger=False,
+        default_root_dir=str(tmp_path),
+    )
+    ev.metrics_sidecar_path = str(sidecar)
     ev.run()
     assert sidecar.exists(), "Sidecar must be written."
     payload = json.loads(sidecar.read_text())
@@ -197,24 +194,17 @@ def test_evaluator_run_writes_metrics_sidecar(tmp_path: Any) -> None:
 
 def test_evaluator_writes_to_predictions_sink(tmp_path: Any) -> None:
     sink = _RecordingSink()
-    ev = LightningSegmentationEvaluator(
-        model=_TinySegmenter(num_classes=2),
-        dataset=_make_flux(8),
-        num_classes=2,
-        loader=Class(
-            DataLoader,
-            batch_size=4,
-            collate_fn=segmentation_collate_fn,
-        ),
-        predictions_sink=sink,
-        lightning=Class(
-            L.Trainer,
-            accelerator="cpu",
-            enable_progress_bar=False,
-            enable_model_summary=False,
-            logger=False,
-            default_root_dir=str(tmp_path),
-        ),
+    ev = LightningSegmentationEvaluator(model=_TinySegmenter(num_classes=2), dataset=_make_flux(8), num_classes=2)
+    # Minimal-ctor pattern: configure the deferred slots post-construction.
+    ev.loader = Class(DataLoader, batch_size=4, collate_fn=segmentation_collate_fn)
+    ev.predictions_sink = sink
+    ev.lightning = Class(
+        L.Trainer,
+        accelerator="cpu",
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        logger=False,
+        default_root_dir=str(tmp_path),
     )
     ev.run()
     # 8 samples; the model emits per-batch [N, C, H, W] logits. The base
