@@ -111,8 +111,8 @@ adapter needed.
 `LightningSegmentationTrainer` subclasses `marainer.trainer.LightningTrainer`,
 so segmentation runs automatically get marainer's default `ModelCheckpoint`
 (`save_last=True` + best by the first val metric) and YAML-config artifact
-logging to every wired Lightning logger. Use `marainer.loggers.Marainer*Logger`
-with `log_all_checkpoints: true` to archive every checkpoint per logger.
+logging to every wired Lightning logger. Wire stock
+`pytorch_lightning.loggers.*` classes under `lightning.logger:`.
 See marainer's README → *Default checkpointing* for details.
 
 ## Dependencies
