@@ -99,7 +99,6 @@ Any encoder name supported by smp works (`resnet50`, `efficientnet-b0`,
 |--------|---------|
 | `SegmentationLoss` | `nn.CrossEntropyLoss` wrapped for Confluid configuration; supports `class_weights` and `ignore_index`. |
 | `segmentation_collate_fn` | DataLoader collate that stacks per-sample image / mask tensors and preserves per-sample metadata as a list (the default collate crashes on string-valued metadata). |
-| `load_lightning_checkpoint` | Strip Lightning's `"model."` prefix when loading a `.ckpt` saved through `marainer.trainer.LightningTrainer`. |
 
 Most torchmetrics segmentation metrics
 (`MulticlassJaccardIndex`, `MulticlassF1Score`, ...) accept logits directly
@@ -114,6 +113,12 @@ so segmentation runs automatically get marainer's default `ModelCheckpoint`
 logging to every wired Lightning logger. Wire stock
 `pytorch_lightning.loggers.*` classes under `lightning.logger:`.
 See marainer's README → *Default checkpointing* for details.
+
+`DeepLabV3PlusModel(checkpoint_path=...)` loads weights via
+`marainer.checkpoint.load_lightning_checkpoint` (imported across the dependency
+boundary, not re-implemented here) — it strips Lightning's `"model."` prefix so
+a marainer-trained `.ckpt` resumes / evaluates cleanly.
+See marainer's README → *Loading checkpoints* for the accepted formats.
 
 ## Dependencies
 

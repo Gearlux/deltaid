@@ -15,7 +15,7 @@ The wrapper exists for three reasons:
    wiring while keeping a sensible default that matches the most common
    spectrogram-segmentation case (resnet34 + ImageNet).
 2. **Checkpoint loading**: ``checkpoint_path`` strips Lightning's ``"model."``
-   prefix via :func:`deltaid.checkpoint.load_lightning_checkpoint`, so a
+   prefix via :func:`marainer.checkpoint.load_lightning_checkpoint`, so a
    marainer-trained model resumes / evaluates cleanly without forcing the
    caller to know about Lightning's wrapping.
 3. **Diagnostic logging**: same per-batch warning pattern as
@@ -41,9 +41,8 @@ import torch
 import torch.nn as nn
 from confluid import configurable
 from logflow import get_logger
+from marainer.checkpoint import load_lightning_checkpoint
 from torch import Tensor
-
-from deltaid.checkpoint import load_lightning_checkpoint
 
 logger = get_logger(__name__)
 
