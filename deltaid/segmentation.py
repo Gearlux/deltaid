@@ -25,7 +25,7 @@ from typing import Any, Dict, List
 
 import torch
 from dataflux.sample import Sample
-from logflow import get_logger
+from loggair import get_logger
 from torch import Tensor
 
 logger = get_logger(__name__)
