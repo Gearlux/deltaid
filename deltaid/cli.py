@@ -7,7 +7,7 @@ to ``marainer segmentation train`` / ``marainer segmentation evaluate``
 """
 
 from liquifai import LiquifyApp
-from logflow import get_logger
+from loggair import get_logger
 
 from deltaid.evaluator import LightningSegmentationEvaluator
 from deltaid.trainer import LightningSegmentationTrainer

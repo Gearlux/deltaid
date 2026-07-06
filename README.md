@@ -127,6 +127,6 @@ See marainer's README → *Loading checkpoints* for the accepted formats.
 | `marainer` | Base Trainer / Evaluator. |
 | `confluid` | YAML-driven dependency injection (`@configurable`, `!class:`, `!ref:`). |
 | `data-flux` | Sample / Flux pipeline plumbing. |
-| `log-flow` | Structured logging. |
+| `loggair` | Structured logging. |
 | `segmentation-models-pytorch` | Underlying smp segmentation model implementations. |
 | `torch`, `torchvision`, `torchmetrics`, `pytorch-lightning` | Standard PyTorch stack. |

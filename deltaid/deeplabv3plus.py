@@ -40,7 +40,7 @@ import segmentation_models_pytorch as smp
 import torch
 import torch.nn as nn
 from confluid import configurable
-from logflow import get_logger
+from loggair import get_logger
 from marainer.checkpoint import load_lightning_checkpoint
 from torch import Tensor
 
