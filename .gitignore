@@ -47,3 +47,4 @@ mypy.txt
 # logs
 logs/
 *.log
+/pyrightconfig.json
