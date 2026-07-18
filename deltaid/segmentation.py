@@ -24,8 +24,8 @@ waivefront op chain emits — see :func:`segmentation_collate_fn` below.
 from typing import Any, Dict, List
 
 import torch
-from dataflux.sample import Sample
 from loggair import get_logger
+from sampleflux.sample import Sample
 from torch import Tensor
 
 logger = get_logger(__name__)
@@ -40,7 +40,7 @@ def segmentation_collate_fn(batch: List[Sample]) -> Sample:
       :class:`waivefront.targets.RegionsToSegmentationMaskOp`).
     * ``sample.target`` — ``[H, W]`` int64 class-id mask.
 
-    The returned :class:`~dataflux.sample.Sample` has:
+    The returned :class:`~sampleflux.sample.Sample` has:
 
     * ``.input`` — ``[N, 3, H, W]`` stacked image tensor.
     * ``.target`` — ``[N, H, W]`` stacked int64 mask.
@@ -50,7 +50,7 @@ def segmentation_collate_fn(batch: List[Sample]) -> Sample:
 
     All per-sample tensors must already share the same spatial dims; mixed
     sizes must be resized upstream (e.g. via Waivefront's
-    :class:`~dataflux.ops.image.ConvertToImageOp`).
+    :class:`~sampleflux.ops.image.ConvertToImageOp`).
     """
     if not batch:
         raise ValueError("segmentation_collate_fn received an empty batch.")

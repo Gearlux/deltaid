@@ -2,7 +2,7 @@
 
 import torch
 import torch.nn as nn
-from dataflux.sample import Sample
+from sampleflux.sample import Sample
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 

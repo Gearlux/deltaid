@@ -66,10 +66,10 @@ typical pipeline:
 
 1. `RegionsJsonSource` reads per-window annotations.
 2. `waivefront.spectrogram.SpectrogramOp` → `MagnitudeOp` →
-   `dataflux.ops.image.ConvertToImageOp` render the IQ → spectrogram → PIL image.
+   `sampleflux.ops.image.ConvertToImageOp` render the IQ → spectrogram → PIL image.
 3. `waivefront.targets.RegionsToSegmentationMaskOp` rasterizes the signal-region
    annotations into a per-pixel int64 mask on `sample.target` (the input stays a
-   PIL image), then `dataflux.ops.torch.ToTensorOp` turns it into the `[3, H, W]`
+   PIL image), then `sampleflux.ops.torch.ToTensorOp` turns it into the `[3, H, W]`
    input tensor.
 4. `deltaid.deeplabv3plus.DeepLabV3PlusModel` consumes the image and emits
    per-pixel class logits.
@@ -126,7 +126,7 @@ See marainer's README → *Loading checkpoints* for the accepted formats.
 |---------|---------|
 | `marainer` | Base Trainer / Evaluator. |
 | `confluid` | YAML-driven dependency injection (`@configurable`, `!class:`, `!ref:`). |
-| `data-flux` | Sample / Flux pipeline plumbing. |
+| `sampleflux` | Sample / Flux pipeline plumbing. |
 | `loggair` | Structured logging. |
 | `segmentation-models-pytorch` | Underlying smp segmentation model implementations. |
 | `torch`, `torchvision`, `torchmetrics`, `pytorch-lightning` | Standard PyTorch stack. |
