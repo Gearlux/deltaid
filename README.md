@@ -60,7 +60,7 @@ trainer: !class:marainer.trainer.LightningTrainer
 
 ### Full end-to-end example
 
-`waivefront-rfuav/config/train_deeplabv3plus.yaml` trains a DeepLabV3+
+`waivefront/config/train_deeplabv3plus.yaml` trains a DeepLabV3+
 segmentation model on RFUAV drone-signal spectrograms. It demonstrates the
 typical pipeline:
 
@@ -78,7 +78,7 @@ typical pipeline:
 Run:
 
 ```bash
-marainer train waivefront-rfuav/config/train_deeplabv3plus.yaml
+marainer train waivefront/config/train_deeplabv3plus.yaml
 ```
 
 ## Models

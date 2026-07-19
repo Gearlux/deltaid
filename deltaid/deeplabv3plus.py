@@ -68,7 +68,7 @@ class DeepLabV3PlusModel(nn.Module):
             initializes the encoder from scratch (useful for offline CI and
             when the input domain is far from natural images).
         in_channels: Input channel count. Defaults to 3 (RGB images, including
-            the rendered spectrogram path used by waivefront-rfuav).
+            the rendered spectrogram path used by the waivefront RFUAV configs).
         decoder_channels: Width of the decoder convolutions. smp's default
             (256) is appropriate for most cases.
         decoder_atrous_rates: Tuple of dilation rates for the ASPP module.
