@@ -1,15 +1,13 @@
-"""Deltaid: semantic-segmentation models and adapters for the Marainer training framework."""
+"""Deltaid: a standard PyTorch-Lightning semantic segmenter, using marainer for optional tracking."""
 
 from deltaid.deeplabv3plus import DeepLabV3PlusModel
-from deltaid.evaluator import LightningSegmentationEvaluator
 from deltaid.segmentation import segmentation_collate_fn
-from deltaid.trainer import LightningSegmentationTrainer
+from deltaid.segmenter import LightningSegmenter
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "DeepLabV3PlusModel",
-    "LightningSegmentationEvaluator",
-    "LightningSegmentationTrainer",
+    "LightningSegmenter",
     "segmentation_collate_fn",
 ]

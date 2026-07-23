@@ -1,4 +1,4 @@
-"""Tests for LightningSegmentationTrainer."""
+"""Tests for LightningSegmenter."""
 
 import torch
 import torch.nn as nn
@@ -7,7 +7,7 @@ from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 
 from deltaid.segmentation import segmentation_collate_fn
-from deltaid.trainer import LightningSegmentationTrainer, _default_segmentation_metrics
+from deltaid.segmenter import LightningSegmenter, _default_segmentation_metrics
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -65,13 +65,13 @@ def test_default_metrics_propagate_ignore_index() -> None:
 
 
 # ---------------------------------------------------------------------------
-# LightningSegmentationTrainer defaults
+# LightningSegmenter defaults
 # ---------------------------------------------------------------------------
 
 
 def test_loss_fn_is_torch_cross_entropy() -> None:
     """Default loss is torch.nn.CrossEntropyLoss — no deltaid adapter class."""
-    trainer = LightningSegmentationTrainer(
+    trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
         train_set=_make_samples(8),
         num_classes=2,
@@ -81,7 +81,7 @@ def test_loss_fn_is_torch_cross_entropy() -> None:
 
 
 def test_ignore_index_flows_into_default_loss_and_metrics() -> None:
-    trainer = LightningSegmentationTrainer(
+    trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=3),
         train_set=_make_samples(8, num_classes=3),
         num_classes=3,
@@ -96,7 +96,7 @@ def test_ignore_index_flows_into_default_loss_and_metrics() -> None:
 
 
 def test_metrics_are_wired_with_correct_prefixes() -> None:
-    trainer = LightningSegmentationTrainer(
+    trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
         train_set=_make_samples(8),
         num_classes=2,
@@ -117,7 +117,7 @@ def test_metrics_are_wired_with_correct_prefixes() -> None:
 def test_default_loader_uses_segmentation_collate_fn() -> None:
     from confluid.fluid import Class as ConfluidClass
 
-    trainer = LightningSegmentationTrainer(
+    trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
         train_set=_make_samples(8),
         num_classes=2,
@@ -134,7 +134,7 @@ def test_default_loader_uses_segmentation_collate_fn() -> None:
 
 
 def test_training_step_returns_scalar_loss() -> None:
-    trainer = LightningSegmentationTrainer(
+    trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
         train_set=_make_samples(8),
         num_classes=2,
@@ -147,7 +147,7 @@ def test_training_step_returns_scalar_loss() -> None:
 
 
 def test_validation_step_returns_scalar_loss() -> None:
-    trainer = LightningSegmentationTrainer(
+    trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
         train_set=_make_samples(8),
         num_classes=2,
@@ -159,7 +159,7 @@ def test_validation_step_returns_scalar_loss() -> None:
 
 
 def test_metrics_update_on_training_step() -> None:
-    trainer = LightningSegmentationTrainer(
+    trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
         train_set=_make_samples(8),
         num_classes=2,
@@ -183,7 +183,7 @@ def test_user_can_override_loss_fn_with_any_upstream_class() -> None:
     upstream nn.Module — here a CE with explicit class_weights, the most common
     "custom loss" segmentation users want — and confirm it sticks.
     """
-    trainer = LightningSegmentationTrainer(
+    trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
         train_set=_make_samples(8),
         num_classes=2,
@@ -197,7 +197,7 @@ def test_user_can_override_loss_fn_with_any_upstream_class() -> None:
 
 
 def test_user_can_override_val_metrics_with_torchmetrics_class() -> None:
-    trainer = LightningSegmentationTrainer(
+    trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
         train_set=_make_samples(8),
         num_classes=2,
