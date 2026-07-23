@@ -1,8 +1,9 @@
 """Tests for LightningSegmenter."""
 
+import numpy as np
 import torch
 import torch.nn as nn
-from sampleflux.sample import Sample
+from sampleflux import Image, Label, Mask, TypedSample
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 
@@ -25,22 +26,29 @@ class _TinySegmenter(nn.Module):
         return self.head(x)  # type: ignore[no-any-return]
 
 
-def _make_samples(n: int = 8, num_classes: int = 2, h: int = 8, w: int = 8) -> list[Sample]:
+def _make_samples(n: int = 8, num_classes: int = 2, h: int = 8, w: int = 8) -> list[TypedSample]:
     return [
-        Sample(
-            input=torch.randn(3, h, w),
-            target=torch.randint(0, num_classes, (h, w), dtype=torch.int64),
-            metadata={"idx": i},
+        TypedSample(
+            {
+                "image": Image(np.random.randn(3, h, w).astype("float32"), layout="CHW"),
+                "mask": Mask(np.random.randint(0, num_classes, (h, w)).astype("int64")),
+                "idx": Label(i),
+            },
+            roles={"mask": "target", "idx": "aux"},
         )
         for i in range(n)
     ]
 
 
-def _make_batch(n: int = 4, num_classes: int = 2, h: int = 8, w: int = 8) -> Sample:
-    return Sample(
-        input=torch.randn(n, 3, h, w),
-        target=torch.randint(0, num_classes, (n, h, w), dtype=torch.int64),
-        metadata={"per_sample": [{"idx": i} for i in range(n)]},
+def _make_batch(n: int = 4, num_classes: int = 2, h: int = 8, w: int = 8) -> TypedSample:
+    # A batched TypedSample shaped like segmentation_collate_fn output: the primary input Image holds the
+    # (pre-batched) [N, 3, H, W] tensor as an ndarray (an Image can't hold a live tensor), the target Mask
+    # holds the [N, H, W] int64 mask, and per-sample metadata rides a "metadata" field.
+    x = torch.randn(n, 3, h, w)
+    y = torch.randint(0, num_classes, (n, h, w), dtype=torch.int64)
+    return TypedSample(
+        {"image": Image(x.numpy(), layout="CHW"), "mask": Mask(y.numpy()), "metadata": [{"idx": i} for i in range(n)]},
+        roles={"mask": "target", "metadata": "aux"},
     )
 
 
