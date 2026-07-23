@@ -3,11 +3,10 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from sampleflux import Image, Label, Mask, Sample
+from sampleflux import Image, Label, Mask, Sample, typed_collate
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 
-from deltaid.segmentation import segmentation_collate_fn
 from deltaid.segmenter import LightningSegmenter, _default_segmentation_metrics
 
 # ---------------------------------------------------------------------------
@@ -41,7 +40,7 @@ def _make_samples(n: int = 8, num_classes: int = 2, h: int = 8, w: int = 8) -> l
 
 
 def _make_batch(n: int = 4, num_classes: int = 2, h: int = 8, w: int = 8) -> Sample:
-    # A batched Sample shaped like segmentation_collate_fn output: the primary input Image holds the
+    # A batched Sample shaped like typed_collate output: the primary input Image holds the
     # (pre-batched) [N, 3, H, W] tensor as an ndarray (an Image can't hold a live tensor), the target Mask
     # holds the [N, H, W] int64 mask, and per-sample metadata rides a "metadata" field.
     x = torch.randn(n, 3, h, w)
@@ -122,7 +121,7 @@ def test_metrics_are_wired_with_correct_prefixes() -> None:
     assert "train/dice_macro" in train_keys
 
 
-def test_default_loader_uses_segmentation_collate_fn() -> None:
+def test_default_loader_uses_typed_collate() -> None:
     from confluid.fluid import Class as ConfluidClass
 
     trainer = LightningSegmenter(
@@ -131,9 +130,9 @@ def test_default_loader_uses_segmentation_collate_fn() -> None:
         num_classes=2,
     )
     assert isinstance(trainer.train_loader, ConfluidClass)
-    assert trainer.train_loader.kwargs.get("collate_fn") is segmentation_collate_fn
+    assert trainer.train_loader.kwargs.get("collate_fn") is typed_collate
     assert isinstance(trainer.val_loader, ConfluidClass)
-    assert trainer.val_loader.kwargs.get("collate_fn") is segmentation_collate_fn
+    assert trainer.val_loader.kwargs.get("collate_fn") is typed_collate
 
 
 # ---------------------------------------------------------------------------

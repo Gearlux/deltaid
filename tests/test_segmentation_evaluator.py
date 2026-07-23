@@ -8,13 +8,12 @@ import pytorch_lightning as L
 import torch
 import torch.nn as nn
 from confluid import Class
-from sampleflux import Image, Label, Mask, Sample
+from sampleflux import Image, Label, Mask, Sample, typed_collate
 from sampleflux.core import Flux
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score
 
-from deltaid.segmentation import segmentation_collate_fn
 from deltaid.segmenter import LightningSegmenter
 
 
@@ -90,12 +89,12 @@ def test_ignore_index_flows_into_default_metrics() -> None:
     assert ev.test_metrics["test/dice_macro"].ignore_index == 255  # type: ignore[attr-defined]
 
 
-def test_default_loader_uses_segmentation_collate_fn() -> None:
+def test_default_loader_uses_typed_collate() -> None:
     from confluid.fluid import Class as ConfluidClass
 
     ev = _evaluator(model=_TinySegmenter(num_classes=2), dataset=_make_flux(8), num_classes=2)
     assert isinstance(ev.test_loader, ConfluidClass)
-    assert ev.test_loader.kwargs.get("collate_fn") is segmentation_collate_fn
+    assert ev.test_loader.kwargs.get("collate_fn") is typed_collate
 
 
 def test_test_step_updates_metrics() -> None:
@@ -126,7 +125,7 @@ def test_evaluator_run_writes_metrics_sidecar(tmp_path: Any) -> None:
         experiment_name="seg_test_exp",
         run_name="seg_test_run",
     )
-    ev.test_loader = Class(DataLoader, batch_size=4, collate_fn=segmentation_collate_fn)
+    ev.test_loader = Class(DataLoader, batch_size=4, collate_fn=typed_collate)
     ev.lightning = Class(
         L.Trainer,
         accelerator="cpu",
@@ -149,7 +148,7 @@ def test_evaluator_run_writes_metrics_sidecar(tmp_path: Any) -> None:
 def test_evaluator_writes_to_predictions_sink(tmp_path: Any) -> None:
     sink = _RecordingSink()
     ev = _evaluator(model=_TinySegmenter(num_classes=2), dataset=_make_flux(8), num_classes=2)
-    ev.test_loader = Class(DataLoader, batch_size=4, collate_fn=segmentation_collate_fn)
+    ev.test_loader = Class(DataLoader, batch_size=4, collate_fn=typed_collate)
     ev.predictions_sink = sink
     ev.lightning = Class(
         L.Trainer,

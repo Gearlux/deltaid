@@ -1,14 +1,17 @@
 # Deltaid
 
-Semantic-segmentation models and adapters for the [Marainer](https://github.com/Gearlux/marainer) training framework.
+A standard PyTorch-Lightning semantic segmenter, using [Marainer](https://github.com/Gearlux/marainer) for optional experiment tracking.
 
-Deltaid provides a thin, Confluid-configurable wrapper around
+Deltaid provides **`LightningSegmenter`** — ONE self-contained, standard
+`pytorch_lightning.LightningModule` with its own step functions and a `run()`
+that builds the loaders + `pl.Trainer` and dispatches on a `task` knob
+(`fit`/`evaluate`/`test`/`predict`) — plus a thin, Confluid-configurable
+wrapper around
 [`segmentation_models_pytorch`](https://github.com/qubvel/segmentation_models.pytorch)
-so segmentation models plug into the **unchanged** base
-`marainer.trainer.LightningTrainer` — no subclassing, no overridden step functions, no
-custom Lightning module. The Trainer's standard
-`preds = self(batch.input); loss = self.loss_fn(preds, batch.target)` flow
-fits segmentation natively.
+(`DeepLabV3PlusModel`). The segmenter owns its segmentation defaults — an
+`ignore_index` `CrossEntropyLoss` and the mean-IoU / Dice metric pair — and
+uses Marainer only for optional experiment tracking and a couple of
+`marainer.torch` utilities.
 
 The first-class model is **DeepLabV3+** (`DeepLabV3PlusModel`), a strong
 single-pass segmentation baseline with ASPP-style multi-scale context. Any
@@ -32,30 +35,38 @@ pip install -e ".[dev]"
 
 ### YAML wiring
 
+The config roots at a top-level `runnable:` key bound to the segmenter, plus a
+`task:` the segmenter's `run()` dispatches on:
+
 ```yaml
-model: !class:deltaid.deeplabv3plus.DeepLabV3PlusModel
+runnable: !class:deltaid.LightningSegmenter
+  task: fit               # fit | evaluate | test | predict
   num_classes: 2          # 0 = background, 1 = foreground
-  encoder_name: resnet34
-  encoder_weights: imagenet
-
-loss_fn: !class:deltaid.segmentation.SegmentationLoss
-  # class_weights: [1.0, 5.0]  # optional — bump foreground if pixels are scarce
-
-val_metrics: !class:torchmetrics.classification.MulticlassJaccardIndex
-  num_classes: 2
-
-train_loader: !lazy:torch.utils.data.DataLoader
-  batch_size: 8
-  shuffle: true
-  collate_fn: !ref:deltaid.segmentation.segmentation_collate_fn
-
-trainer: !class:marainer.trainer.LightningTrainer
   experiment_name: my_segmentation
   run_name: deeplabv3plus_resnet34
-  model: !ref:model
-  loss_fn: !ref:loss_fn
-  val_metrics: !ref:val_metrics
-  ...
+
+  model: !class:deltaid.deeplabv3plus.DeepLabV3PlusModel
+    num_classes: 2
+    encoder_name: resnet34
+    encoder_weights: imagenet
+
+  train_set: !ref:train_set   # a sampleflux Flux yielding (image tensor, mask) samples
+  val_set: !ref:val_set
+
+  # Loss (ignore_index CrossEntropyLoss), the mean-IoU / Dice metrics,
+  # sampleflux.typed_collate, and AdamW are baked in as defaults. Override any of
+  # them with an upstream-library class — no deltaid adapter wrapper exists:
+  # loss_fn: !class:torch.nn.CrossEntropyLoss
+  #   weight: [1.0, 5.0]      # bump foreground if pixels are scarce
+  # val_metrics: !class:torchmetrics.classification.MulticlassJaccardIndex
+  #   num_classes: 2
+
+  # Lightning runtime knobs (epochs, devices, loggers, checkpoint callbacks):
+  lightning: !lazy:pytorch_lightning.Trainer
+    max_epochs: 20
+    logger:
+      - !class:pytorch_lightning.loggers.TensorBoardLogger
+        save_dir: ./lightning_logs
 ```
 
 ### Full end-to-end example
@@ -73,12 +84,13 @@ typical pipeline:
    input tensor.
 4. `deltaid.deeplabv3plus.DeepLabV3PlusModel` consumes the image and emits
    per-pixel class logits.
-5. `deltaid.segmentation.SegmentationLoss` (CrossEntropyLoss) trains it.
+5. `LightningSegmenter`'s built-in `ignore_index` `CrossEntropyLoss` trains it.
 
-Run:
+Run (the per-project CLI, or the generic `sampleflux run`):
 
 ```bash
-marainer train waivefront/config/train_deeplabv3plus.yaml
+deltaid train waivefront/config/train_deeplabv3plus.yaml
+# or: sampleflux run waivefront/config/train_deeplabv3plus.yaml
 ```
 
 ## Models
@@ -97,34 +109,39 @@ Any encoder name supported by smp works (`resnet50`, `efficientnet-b0`,
 
 | Symbol | Purpose |
 |--------|---------|
-| `SegmentationLoss` | `nn.CrossEntropyLoss` wrapped for Confluid configuration; supports `class_weights` and `ignore_index`. |
-| `segmentation_collate_fn` | DataLoader collate that stacks per-sample image / mask tensors and preserves per-sample metadata as a list (the default collate crashes on string-valued metadata). |
+| `sampleflux.typed_collate` | The generic DataLoader collate the segmenter wires in (no bespoke deltaid collate). Stacks the `[3, H, W]` `Image` input and the fully-stackable `[H, W]` `Mask` target into batched tensors and keeps aux fields as per-sample lists. It is the segmenter's default loader `collate_fn`. |
+
+The loss is not a deltaid class — `LightningSegmenter` builds a plain
+`torch.nn.CrossEntropyLoss(ignore_index=...)` internally. Pass any upstream-library
+loss (`torch.nn`, `segmentation_models_pytorch.losses`, `kornia.losses`, ...) under
+`loss_fn:` to override it.
 
 Most torchmetrics segmentation metrics
 (`MulticlassJaccardIndex`, `MulticlassF1Score`, ...) accept logits directly
 and emit a scalar — they wire into `val_metrics` straight from YAML, no
 adapter needed.
 
-## Inherited from marainer
+## Marainer integration
 
-`LightningSegmentationTrainer` subclasses `marainer.trainer.LightningTrainer`,
-so segmentation runs automatically get marainer's default `ModelCheckpoint`
-(`save_last=True` + best by the first val metric) and YAML-config artifact
-logging to every wired Lightning logger. Wire stock
-`pytorch_lightning.loggers.*` classes under `lightning.logger:`.
-See marainer's README → *Default checkpointing* for details.
+`LightningSegmenter` is a standard `pytorch_lightning.LightningModule`, so
+checkpointing and loggers are wired as stock Lightning: pass
+`pytorch_lightning.callbacks.ModelCheckpoint` and `pytorch_lightning.loggers.*`
+classes under the `lightning:` Trainer block (see the Quick Start snippet).
+Marainer is used only for optional experiment tracking (attach
+`marainer.tracking.*` trackers under the segmenter's `trackers:` key) and a
+couple of small `marainer.torch` utilities.
 
 `DeepLabV3PlusModel(checkpoint_path=...)` loads weights via
-`marainer.checkpoint.load_lightning_checkpoint` (imported across the dependency
+`marainer.torch.load_lightning_checkpoint` (imported across the dependency
 boundary, not re-implemented here) — it strips Lightning's `"model."` prefix so
-a marainer-trained `.ckpt` resumes / evaluates cleanly.
+a `.ckpt` saved through a Lightning wrapper resumes / evaluates cleanly.
 See marainer's README → *Loading checkpoints* for the accepted formats.
 
 ## Dependencies
 
 | Package | Purpose |
 |---------|---------|
-| `marainer` | Base Trainer / Evaluator. |
+| `marainer` | Optional experiment tracking + `marainer.torch` utilities (checkpoint loading). |
 | `confluid` | YAML-driven dependency injection (`@configurable`, `!class:`, `!ref:`). |
 | `sampleflux` | Sample / Flux pipeline plumbing. |
 | `loggair` | Structured logging. |

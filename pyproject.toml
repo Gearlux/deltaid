@@ -1,7 +1,7 @@
 [project]
 name = "deltaid"
 version = "0.1.0"
-description = "Semantic-segmentation models and adapters for the Marainer training framework."
+description = "Semantic-segmentation models and a standard-Lightning segmenter (DeepLabV3+ / smp)."
 authors = [{name = "Taidal"}]
 license = {text = "MIT"}
 dependencies = [
