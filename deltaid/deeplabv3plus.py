@@ -1,12 +1,11 @@
-"""DeepLabV3+ semantic-segmentation wrapper for the Marainer Trainer flow.
+"""DeepLabV3+ semantic-segmentation wrapper.
 
 Wraps :class:`segmentation_models_pytorch.DeepLabV3Plus` (smp) into a plain
 :class:`torch.nn.Module` whose ``forward(images) -> logits`` signature plugs
-straight into the **unchanged** base :class:`marainer.trainer.LightningTrainer`. Marainer
-already calls ``preds = self(batch.input)`` and
-``loss = self.loss_fn(preds, batch.target)`` — for segmentation that's all the
-glue we need. No bundled batch type, no step-output dict, no per-mode forward
-divergence.
+straight into :class:`deltaid.segmenter.LightningSegmenter`, which calls
+``preds = self(batch.input)`` and ``loss = self.loss_fn(preds, batch.target)``
+in its ``training_step`` — for segmentation that's all the glue we need. No
+bundled batch type, no step-output dict, no per-mode forward divergence.
 
 The wrapper exists for three reasons:
 
@@ -15,8 +14,8 @@ The wrapper exists for three reasons:
    wiring while keeping a sensible default that matches the most common
    spectrogram-segmentation case (resnet34 + ImageNet).
 2. **Checkpoint loading**: ``checkpoint_path`` strips Lightning's ``"model."``
-   prefix via :func:`marainer.checkpoint.load_lightning_checkpoint`, so a
-   marainer-trained model resumes / evaluates cleanly without forcing the
+   prefix via :func:`marainer.torch.load_lightning_checkpoint`, so a
+   Lightning-trained model resumes / evaluates cleanly without forcing the
    caller to know about Lightning's wrapping.
 3. **Diagnostic logging**: same per-batch warning pattern as
    :class:`raidar.faster_rcnn.FasterRCNNModel` — surface zero-positive batches
@@ -29,7 +28,8 @@ Typical wiring (YAML)::
       num_classes: 2
       encoder_name: resnet34
       encoder_weights: imagenet
-    loss_fn: !class:deltaid.segmentation.SegmentationLoss
+    loss_fn: !class:torch.nn.CrossEntropyLoss
+      ignore_index: -100
     val_metrics: !class:torchmetrics.classification.MulticlassJaccardIndex
       num_classes: 2
 """

@@ -44,13 +44,11 @@ from marainer.run_names import generate_run_name
 from marainer.torch import ensure_sample_dataset
 from marainer.tracking.base import Tracker
 from pytorch_lightning.loggers import Logger
-from sampleflux import Label, Sample, item_data, primary
+from sampleflux import Label, Sample, item_data, primary, typed_collate
 from sampleflux.runnable import ProgressReporting, TorchRunner, entrypoint
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
-
-from deltaid.segmentation import segmentation_collate_fn
 
 logger = get_logger(__name__)
 
@@ -70,34 +68,63 @@ def _default_segmentation_metrics(num_classes: int, ignore_index: int) -> Metric
     )
 
 
-def _batch_input(batch: Any) -> torch.Tensor:
-    """The ``[N, 3, H, W]`` input tensor from a collated batch.
+def _batch_input(batch: Sample) -> torch.Tensor:
+    """The ``[N, 3, H, W]`` input tensor from a :func:`~sampleflux.typed_collate` batch.
 
-    The typed collate (:func:`deltaid.segmentation.segmentation_collate_fn`) returns a batched
-    :class:`~sampleflux.Sample` whose primary ``input`` item is an :class:`~sampleflux.Image`; an
-    Image cannot hold a live tensor (``NDArrayItem.__new__`` runs ``np.asarray``), so its payload comes
-    back as an ndarray and is converted with a cheap, memory-sharing ``torch.as_tensor``. A raw tensor
-    batch (fed directly, unwrapped) is passed through.
+    The generic typed collate stacks the primary ``input`` :class:`~sampleflux.Image` field; an Image
+    cannot hold a live tensor (``NDArrayItem.__new__`` runs ``np.asarray``), so its payload comes back
+    as an ndarray and is converted here with a cheap, memory-sharing ``torch.as_tensor`` — the pipeline
+    already tensorized the per-sample image (``ConvertToImageOp`` → ``ToTensorOp``), so collate just
+    stacks and this only unwraps.
     """
-    if isinstance(batch, Sample):
-        _, item = primary(batch, "input")
-        data = item_data(item)
-        return data if isinstance(data, torch.Tensor) else torch.as_tensor(np.asarray(data))
-    return cast(torch.Tensor, batch)
+    _, item = primary(batch, "input")
+    data = item_data(item)
+    return data if isinstance(data, torch.Tensor) else torch.as_tensor(np.asarray(data))
 
 
-def _batch_target(batch: Any) -> torch.Tensor:
-    """The ``[N, H, W]`` int64 target-mask tensor from a collated batch (typed bag or raw tensor).
+def _batch_target(batch: Sample) -> torch.Tensor:
+    """The ``[N, H, W]`` int64 target-mask tensor from a :func:`~sampleflux.typed_collate` batch.
 
-    In the typed bag the primary ``target`` field is a :class:`~sampleflux.Mask` (an array item), so its
-    payload comes back as an ndarray and is converted with ``torch.as_tensor``; a :class:`~sampleflux.Label`
-    target (defensive) yields its ``.value``. A raw tensor batch is passed through.
+    The primary ``target`` :class:`~sampleflux.Mask` is fully stackable, so the generic typed collate
+    stacks it to ``[N, H, W]`` and its payload comes back as an ndarray (converted with ``torch.as_tensor``
+    and promoted to ``int64`` for the pixel-class-id CrossEntropy contract). A defensive
+    :class:`~sampleflux.Label` target (a per-sample list the typed collate does NOT stack) is stacked here.
     """
-    if isinstance(batch, Sample):
-        _, item = primary(batch, "target")
-        data = item.value if isinstance(item, Label) else item_data(item)
-        return data if isinstance(data, torch.Tensor) else torch.as_tensor(np.asarray(data))
-    return cast(torch.Tensor, batch)
+    _, item = primary(batch, "target")
+    data = item.value if isinstance(item, Label) else item_data(item)
+    if isinstance(data, list):
+        data = torch.stack([torch.as_tensor(v) for v in data])
+    elif not isinstance(data, torch.Tensor):
+        data = torch.as_tensor(np.asarray(data))
+    return data if data.dtype == torch.int64 else data.long()
+
+
+def _batch_metadata(batch: Sample) -> Optional[List[Dict[str, Any]]]:
+    """Per-sample metadata dicts recovered from a batched :class:`~sampleflux.Sample`.
+
+    A :func:`~sampleflux.typed_collate` batch carries the non-primary (aux) fields as their own
+    per-sample lists (a :class:`~sampleflux.Label`'s ``.value`` is a list, an array item a stacked
+    payload) — transpose them into a list-of-dicts so predictions sinks can correlate outputs to
+    source samples. A hand-built batch that instead carries a single list-valued ``"metadata"`` field
+    is returned verbatim.
+    """
+    if "metadata" in batch and isinstance(batch["metadata"], list):
+        return list(batch["metadata"])
+    input_key = primary(batch, "input")[0]
+    try:
+        target_key: Any = primary(batch, "target")[0]
+    except KeyError:
+        target_key = None
+    columns: Dict[str, Any] = {}
+    for key in batch.keys():
+        if key in (input_key, target_key):
+            continue
+        item = batch[key]
+        columns[key] = item.value if isinstance(item, Label) else item_data(item)
+    if not columns:
+        return None
+    n = min(len(v) for v in columns.values())
+    return [{k: columns[k][i] for k in columns} for i in range(n)]
 
 
 @configurable(task="segmentation", role="trainer")
@@ -148,7 +175,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         self.loss_fn: nn.Module = nn.CrossEntropyLoss(ignore_index=self.ignore_index)
         self.optimizer: Any = LazyClass(torch.optim.AdamW, lr=1e-4, weight_decay=0.05)
         loader_kw = dict(
-            collate_fn=segmentation_collate_fn,
+            collate_fn=typed_collate,
             batch_size=batch_size,
             num_workers=num_workers,
             persistent_workers=num_workers != 0,
@@ -330,16 +357,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
 
     # ---- predictions + metrics ---------------------------------------------- #
     def _write_predictions(self, preds: Any, batch: Any) -> None:
-        per_sample_meta = None
-        if isinstance(batch, Sample):
-            # The typed collate stashes the per-sample metadata dicts under a "metadata" field.
-            per_sample_meta = batch["metadata"] if "metadata" in batch else None
-        else:
-            meta = getattr(batch, "metadata", None)
-            if isinstance(meta, list):
-                per_sample_meta = meta
-            elif isinstance(meta, dict):
-                per_sample_meta = meta.get("per_sample")
+        per_sample_meta = _batch_metadata(batch) if isinstance(batch, Sample) else None
         items = (
             preds["predictions"]
             if isinstance(preds, dict) and "predictions" in preds
