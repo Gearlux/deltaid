@@ -3,12 +3,13 @@
 import json
 from typing import Any, Dict, List
 
+import numpy as np
 import pytorch_lightning as L
 import torch
 import torch.nn as nn
 from confluid import Class
+from sampleflux import Image, Label, Mask, TypedSample
 from sampleflux.core import Flux
-from sampleflux.sample import Sample
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score
@@ -34,14 +35,26 @@ class _TinySegmenter(nn.Module):
 
 def _make_flux(n: int = 8, num_classes: int = 2, h: int = 8, w: int = 8) -> Flux:
     samples = [
-        Sample(
-            input=torch.randn(3, h, w),
-            target=torch.randint(0, num_classes, (h, w), dtype=torch.int64),
-            metadata={"idx": i},
+        TypedSample(
+            {
+                "image": Image(np.random.randn(3, h, w).astype("float32"), layout="CHW"),
+                "mask": Mask(np.random.randint(0, num_classes, (h, w)).astype("int64")),
+                "idx": Label(i),
+            },
+            roles={"mask": "target", "idx": "aux"},
         )
         for i in range(n)
     ]
     return Flux(source=samples)
+
+
+def _make_batch(n: int = 4, num_classes: int = 2, h: int = 8, w: int = 8) -> TypedSample:
+    x = torch.randn(n, 3, h, w)
+    y = torch.randint(0, num_classes, (n, h, w), dtype=torch.int64)
+    return TypedSample(
+        {"image": Image(x.numpy(), layout="CHW"), "mask": Mask(y.numpy()), "metadata": [{"idx": i} for i in range(n)]},
+        roles={"mask": "target", "metadata": "aux"},
+    )
 
 
 class _RecordingSink:
@@ -87,11 +100,7 @@ def test_default_loader_uses_segmentation_collate_fn() -> None:
 
 def test_test_step_updates_metrics() -> None:
     ev = _evaluator(model=_TinySegmenter(num_classes=2), dataset=_make_flux(8), num_classes=2)
-    batch = Sample(
-        input=torch.randn(4, 3, 8, 8),
-        target=torch.randint(0, 2, (4, 8, 8), dtype=torch.int64),
-        metadata={"per_sample": [{"idx": i} for i in range(4)]},
-    )
+    batch = _make_batch(n=4, num_classes=2)
     ev.test_step(batch, 0)
     computed = ev.test_metrics.compute()
     assert all(isinstance(v, torch.Tensor) for v in computed.values())
@@ -102,11 +111,7 @@ def test_user_can_override_metrics_with_torchmetrics_class() -> None:
     ev = _evaluator(model=_TinySegmenter(num_classes=2), dataset=_make_flux(8), num_classes=2)
     custom = MetricCollection({"test/f1_only": MulticlassF1Score(num_classes=2, average="macro")})
     ev.test_metrics = custom
-    batch = Sample(
-        input=torch.randn(4, 3, 8, 8),
-        target=torch.randint(0, 2, (4, 8, 8), dtype=torch.int64),
-        metadata={"per_sample": [{"idx": i} for i in range(4)]},
-    )
+    batch = _make_batch(n=4, num_classes=2)
     ev.test_step(batch, 0)
     assert "test/f1_only" in ev.test_metrics.keys()
     assert len(list(ev.test_metrics.keys())) == 1
