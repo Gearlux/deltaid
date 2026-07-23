@@ -79,9 +79,9 @@ typical pipeline:
 2. `waivefront.spectrogram.SpectrogramOp` → `MagnitudeOp` →
    `sampleflux.ops.image.ConvertToImageOp` render the IQ → spectrogram → PIL image.
 3. `waivefront.targets.RegionsToSegmentationMaskOp` rasterizes the signal-region
-   annotations into a per-pixel int64 mask on `sample.target` (the input stays a
-   PIL image), then `sampleflux.ops.torch.ToTensorOp` turns it into the `[3, H, W]`
-   input tensor.
+   annotations into a per-pixel int64 mask as the target-role `Mask` item (the
+   input stays a PIL image), then `sampleflux.ops.torch.ToTensorOp` turns it into
+   the `[3, H, W]` input tensor.
 4. `deltaid.deeplabv3plus.DeepLabV3PlusModel` consumes the image and emits
    per-pixel class logits.
 5. `LightningSegmenter`'s built-in `ignore_index` `CrossEntropyLoss` trains it.
