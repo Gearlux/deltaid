@@ -3,15 +3,15 @@
 import numpy as np
 import pytest
 import torch
-from sampleflux import Image, Label, Mask, TypedSample
+from sampleflux import Image, Label, Mask, Sample
 
 from deltaid.segmentation import segmentation_collate_fn
 from deltaid.segmenter import _batch_input, _batch_target
 
 
-def _make_sample(value: int = 0, h: int = 8, w: int = 8) -> TypedSample:
-    """A per-sample TypedSample shaped like a typed segmentation source: Image input + Mask target + aux."""
-    return TypedSample(
+def _make_sample(value: int = 0, h: int = 8, w: int = 8) -> Sample:
+    """A per-sample Sample shaped like a typed segmentation source: Image input + Mask target + aux."""
+    return Sample(
         {
             "image": Image(np.full((3, h, w), float(value), dtype="float32"), layout="CHW"),
             "mask": Mask(np.full((h, w), value, dtype="int64")),
@@ -25,7 +25,7 @@ def _make_sample(value: int = 0, h: int = 8, w: int = 8) -> TypedSample:
 def test_collate_stacks_inputs_and_targets() -> None:
     batch = [_make_sample(0), _make_sample(1), _make_sample(2)]
     result = segmentation_collate_fn(batch)
-    assert isinstance(result, TypedSample)
+    assert isinstance(result, Sample)
     x = _batch_input(result)
     y = _batch_target(result)
     assert x.shape == (3, 3, 8, 8)
@@ -47,7 +47,7 @@ def test_collate_preserves_string_metadata_as_list() -> None:
 
 
 def test_collate_promotes_non_int64_targets() -> None:
-    s = TypedSample(
+    s = Sample(
         {
             "image": Image(np.zeros((3, 4, 4), dtype="float32"), layout="CHW"),
             "mask": Mask(np.zeros((4, 4), dtype="int32")),
@@ -59,7 +59,7 @@ def test_collate_promotes_non_int64_targets() -> None:
 
 
 def test_collate_handles_empty_metadata() -> None:
-    s = TypedSample(
+    s = Sample(
         {
             "image": Image(np.zeros((3, 4, 4), dtype="float32"), layout="CHW"),
             "mask": Mask(np.zeros((4, 4), dtype="int64")),
@@ -89,7 +89,7 @@ def test_collate_rejects_empty_batch() -> None:
 
 
 def test_collate_rejects_non_tensor_input() -> None:
-    bad = TypedSample(
+    bad = Sample(
         {"image": Label("not a tensor"), "mask": Mask(np.zeros((4, 4), dtype="int64"))},
         roles={"mask": "target"},
     )
@@ -98,7 +98,7 @@ def test_collate_rejects_non_tensor_input() -> None:
 
 
 def test_collate_rejects_non_tensor_target() -> None:
-    bad = TypedSample(
+    bad = Sample(
         {"image": Image(np.zeros((3, 4, 4), dtype="float32"), layout="CHW"), "mask": Label("not a mask")},
         roles={"mask": "target"},
     )
