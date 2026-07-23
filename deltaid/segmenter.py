@@ -44,7 +44,7 @@ from marainer.run_names import generate_run_name
 from marainer.torch import ensure_sample_dataset
 from marainer.tracking.base import Tracker
 from pytorch_lightning.loggers import Logger
-from sampleflux import Label, TypedSample, item_data, primary
+from sampleflux import Label, Sample, item_data, primary
 from sampleflux.runnable import ProgressReporting, TorchRunner, entrypoint
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
@@ -74,31 +74,30 @@ def _batch_input(batch: Any) -> torch.Tensor:
     """The ``[N, 3, H, W]`` input tensor from a collated batch.
 
     The typed collate (:func:`deltaid.segmentation.segmentation_collate_fn`) returns a batched
-    :class:`~sampleflux.TypedSample` whose primary ``input`` item is an :class:`~sampleflux.Image`; an
+    :class:`~sampleflux.Sample` whose primary ``input`` item is an :class:`~sampleflux.Image`; an
     Image cannot hold a live tensor (``NDArrayItem.__new__`` runs ``np.asarray``), so its payload comes
-    back as an ndarray and is converted with a cheap, memory-sharing ``torch.as_tensor``. A legacy
-    ``Sample`` batch (for any path still fed the legacy carrier) exposes its stacked tensor as
-    ``.input`` directly.
+    back as an ndarray and is converted with a cheap, memory-sharing ``torch.as_tensor``. A raw tensor
+    batch (fed directly, unwrapped) is passed through.
     """
-    if isinstance(batch, TypedSample):
+    if isinstance(batch, Sample):
         _, item = primary(batch, "input")
         data = item_data(item)
         return data if isinstance(data, torch.Tensor) else torch.as_tensor(np.asarray(data))
-    return cast(torch.Tensor, batch.input)
+    return cast(torch.Tensor, batch)
 
 
 def _batch_target(batch: Any) -> torch.Tensor:
-    """The ``[N, H, W]`` int64 target-mask tensor from a collated batch (typed bag or legacy ``Sample``).
+    """The ``[N, H, W]`` int64 target-mask tensor from a collated batch (typed bag or raw tensor).
 
     In the typed bag the primary ``target`` field is a :class:`~sampleflux.Mask` (an array item), so its
     payload comes back as an ndarray and is converted with ``torch.as_tensor``; a :class:`~sampleflux.Label`
-    target (defensive) yields its ``.value``.
+    target (defensive) yields its ``.value``. A raw tensor batch is passed through.
     """
-    if isinstance(batch, TypedSample):
+    if isinstance(batch, Sample):
         _, item = primary(batch, "target")
         data = item.value if isinstance(item, Label) else item_data(item)
         return data if isinstance(data, torch.Tensor) else torch.as_tensor(np.asarray(data))
-    return cast(torch.Tensor, batch.target)
+    return cast(torch.Tensor, batch)
 
 
 @configurable(task="segmentation", role="trainer")
@@ -332,7 +331,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
     # ---- predictions + metrics ---------------------------------------------- #
     def _write_predictions(self, preds: Any, batch: Any) -> None:
         per_sample_meta = None
-        if isinstance(batch, TypedSample):
+        if isinstance(batch, Sample):
             # The typed collate stashes the per-sample metadata dicts under a "metadata" field.
             per_sample_meta = batch["metadata"] if "metadata" in batch else None
         else:

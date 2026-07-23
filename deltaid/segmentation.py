@@ -4,7 +4,7 @@ Segmentation plugs into the segmenter's own step flow: a model takes
 ``[N, 3, H, W]`` images and emits ``[N, C, H, W]`` logits, and the loss /
 metric pair both consume ``(logits, target_mask)`` directly. No step-output
 dict, no per-mode forward divergence — the segmenter recovers the input
-tensor + target mask from the batched :class:`~sampleflux.TypedSample` (via
+tensor + target mask from the batched :class:`~sampleflux.Sample` (via
 ``_batch_input`` / ``_batch_target`` in :mod:`deltaid.segmenter`).
 
 The loss and metrics themselves are off-the-shelf upstream classes —
@@ -17,7 +17,7 @@ wants to swap in :class:`segmentation_models_pytorch.losses.DiceLoss`,
 directly from YAML without writing a deltaid wrapper.
 
 The one helper that *does* need to live in deltaid is the DataLoader
-collate function: the typed sources yield a :class:`~sampleflux.TypedSample`
+collate function: the typed sources yield a :class:`~sampleflux.Sample`
 (an :class:`~sampleflux.Image` input + a :class:`~sampleflux.Mask` target),
 and the collate stacks them + preserves the per-sample metadata (``pack_id``,
 ``iq_file``, …) that torch's default collate crashes on — see
@@ -29,7 +29,7 @@ from typing import Any, Dict, List
 import numpy as np
 import torch
 from loggair import get_logger
-from sampleflux import Image, Label, Mask, TypedSample, item_data, primary
+from sampleflux import Image, Label, Mask, Sample, item_data, primary
 from torch import Tensor
 
 logger = get_logger(__name__)
@@ -54,8 +54,8 @@ def _as_tensor(value: Any, what: str) -> Tensor:
     )
 
 
-def _sample_metadata(sample: TypedSample) -> Dict[str, Any]:
-    """Gather a :class:`~sampleflux.TypedSample`'s NON-primary fields into a plain metadata dict.
+def _sample_metadata(sample: Sample) -> Dict[str, Any]:
+    """Gather a :class:`~sampleflux.Sample`'s NON-primary fields into a plain metadata dict.
 
     The typed bag has no free-form metadata dict — auxiliary features (``pack_id`` / ``iq_file`` …)
     ride as their own fields. This collects every field that is not the primary input or the primary
@@ -74,13 +74,13 @@ def _sample_metadata(sample: TypedSample) -> Dict[str, Any]:
     }
 
 
-def segmentation_collate_fn(batch: List[TypedSample]) -> TypedSample:
-    """Collate per-sample segmentation :class:`~sampleflux.TypedSample`\\ s into ONE batched bag.
+def segmentation_collate_fn(batch: List[Sample]) -> Sample:
+    """Collate per-sample segmentation :class:`~sampleflux.Sample`\\ s into ONE batched bag.
 
     The default DataLoader collate the deltaid segmenter wires in. Per sample it reads the primary
     ``input`` item's payload (``item_data(primary(s, "input"))``) as a ``[3, H, W]`` image tensor and
     the primary ``target`` item's payload as a ``[H, W]`` class-id mask (forced to ``int64``), then
-    stacks into ONE batched :class:`~sampleflux.TypedSample`:
+    stacks into ONE batched :class:`~sampleflux.Sample`:
 
     * field ``"image"`` — an :class:`~sampleflux.Image` (``layout="CHW"``) over the stacked
       ``[N, 3, H, W]`` payload. An :class:`~sampleflux.Image` cannot hold a live ``torch.Tensor``
@@ -108,7 +108,7 @@ def segmentation_collate_fn(batch: List[TypedSample]) -> TypedSample:
         targets.append(mask.long() if mask.dtype != torch.int64 else mask)
         metas.append(_sample_metadata(s))
 
-    return TypedSample(
+    return Sample(
         {
             "image": Image(torch.stack(images), layout="CHW"),
             "mask": Mask(torch.stack(targets)),

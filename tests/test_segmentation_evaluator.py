@@ -8,7 +8,7 @@ import pytorch_lightning as L
 import torch
 import torch.nn as nn
 from confluid import Class
-from sampleflux import Image, Label, Mask, TypedSample
+from sampleflux import Image, Label, Mask, Sample
 from sampleflux.core import Flux
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
@@ -35,7 +35,7 @@ class _TinySegmenter(nn.Module):
 
 def _make_flux(n: int = 8, num_classes: int = 2, h: int = 8, w: int = 8) -> Flux:
     samples = [
-        TypedSample(
+        Sample(
             {
                 "image": Image(np.random.randn(3, h, w).astype("float32"), layout="CHW"),
                 "mask": Mask(np.random.randint(0, num_classes, (h, w)).astype("int64")),
@@ -48,10 +48,10 @@ def _make_flux(n: int = 8, num_classes: int = 2, h: int = 8, w: int = 8) -> Flux
     return Flux(source=samples)
 
 
-def _make_batch(n: int = 4, num_classes: int = 2, h: int = 8, w: int = 8) -> TypedSample:
+def _make_batch(n: int = 4, num_classes: int = 2, h: int = 8, w: int = 8) -> Sample:
     x = torch.randn(n, 3, h, w)
     y = torch.randint(0, num_classes, (n, h, w), dtype=torch.int64)
-    return TypedSample(
+    return Sample(
         {"image": Image(x.numpy(), layout="CHW"), "mask": Mask(y.numpy()), "metadata": [{"idx": i} for i in range(n)]},
         roles={"mask": "target", "metadata": "aux"},
     )
