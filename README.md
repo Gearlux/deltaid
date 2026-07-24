@@ -76,11 +76,11 @@ segmentation model on RFUAV drone-signal spectrograms. It demonstrates the
 typical pipeline:
 
 1. `RegionsJsonSource` reads per-window annotations.
-2. `waivefront.spectrogram.SpectrogramOp` → `MagnitudeOp` →
-   `sampleflux.ops.image.ConvertToImageOp` render the IQ → spectrogram → PIL image.
+2. `waivefront.spectrogram.Spectrogram` → `Magnitude` →
+   `sampleflux.ops.image.ConvertToImage` render the IQ → spectrogram → PIL image.
 3. `waivefront.targets.RegionsToSegmentationMaskOp` rasterizes the signal-region
    annotations into a per-pixel int64 mask as the target-role `Mask` item (the
-   input stays a PIL image), then `sampleflux.ops.torch.ToTensorOp` turns it into
+   input stays a PIL image), then `sampleflux.ops.torch.ToTensor` turns it into
    the `[3, H, W]` input tensor.
 4. `deltaid.deeplabv3plus.DeepLabV3PlusModel` consumes the image and emits
    per-pixel class logits.
