@@ -54,7 +54,7 @@ runnable: !class:deltaid.LightningSegmenter
   val_set: !ref:val_set
 
   # Loss (ignore_index CrossEntropyLoss), the mean-IoU / Dice metrics,
-  # sampleflux.typed_collate, and AdamW are baked in as defaults. Override any of
+  # sampleflux.collate_records, and AdamW are baked in as defaults. Override any of
   # them with an upstream-library class — no deltaid adapter wrapper exists:
   # loss_fn: !class:torch.nn.CrossEntropyLoss
   #   weight: [1.0, 5.0]      # bump foreground if pixels are scarce
@@ -109,7 +109,7 @@ Any encoder name supported by smp works (`resnet50`, `efficientnet-b0`,
 
 | Symbol | Purpose |
 |--------|---------|
-| `sampleflux.typed_collate` | The generic DataLoader collate the segmenter wires in (no bespoke deltaid collate). Stacks the `[3, H, W]` `Image` input and the fully-stackable `[H, W]` `Mask` target into batched tensors and keeps aux fields as per-sample lists. It is the segmenter's default loader `collate_fn`. |
+| `sampleflux.collate_records` | The generic DataLoader collate the segmenter wires in (no bespoke deltaid collate). Stacks the input under `input_key` (default `image`) and the fully-stackable `[H, W]` `Mask` target under `target_key` (default `target`) into batched tensors, keeping the other record keys as per-record lists. It is the segmenter's default loader `collate_fn`. |
 
 The loss is not a deltaid class — `LightningSegmenter` builds a plain
 `torch.nn.CrossEntropyLoss(ignore_index=...)` internally. Pass any upstream-library
