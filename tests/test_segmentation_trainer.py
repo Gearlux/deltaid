@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from sampleflux import Image, Label, Mask, Sample, typed_collate
+from sampleflux import Image, Mask, Record, collate_records
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 
@@ -25,30 +25,28 @@ class _TinySegmenter(nn.Module):
         return self.head(x)  # type: ignore[no-any-return]
 
 
-def _make_samples(n: int = 8, num_classes: int = 2, h: int = 8, w: int = 8) -> list[Sample]:
+def _make_samples(n: int = 8, num_classes: int = 2, h: int = 8, w: int = 8) -> list[Record]:
     return [
-        Sample(
-            {
-                "image": Image(np.random.randn(3, h, w).astype("float32"), layout="CHW"),
-                "mask": Mask(np.random.randint(0, num_classes, (h, w)).astype("int64")),
-                "idx": Label(i),
-            },
-            roles={"mask": "target", "idx": "aux"},
-        )
+        {
+            "image": Image(np.random.randn(3, h, w).astype("float32"), layout="CHW"),
+            "target": Mask(np.random.randint(0, num_classes, (h, w)).astype("int64")),
+            "idx": i,
+        }
         for i in range(n)
     ]
 
 
-def _make_batch(n: int = 4, num_classes: int = 2, h: int = 8, w: int = 8) -> Sample:
-    # A batched Sample shaped like typed_collate output: the primary input Image holds the
-    # (pre-batched) [N, 3, H, W] tensor as an ndarray (an Image can't hold a live tensor), the target Mask
-    # holds the [N, H, W] int64 mask, and per-sample metadata rides a "metadata" field.
+def _make_batch(n: int = 4, num_classes: int = 2, h: int = 8, w: int = 8) -> Record:
+    # A batched record shaped like collate_records output: the input Image holds the (pre-batched)
+    # [N, 3, H, W] tensor as an ndarray (an Image can't hold a live tensor), the target Mask holds
+    # the [N, H, W] int64 mask, and per-record metadata rides a "metadata" key.
     x = torch.randn(n, 3, h, w)
     y = torch.randint(0, num_classes, (n, h, w), dtype=torch.int64)
-    return Sample(
-        {"image": Image(x.numpy(), layout="CHW"), "mask": Mask(y.numpy()), "metadata": [{"idx": i} for i in range(n)]},
-        roles={"mask": "target", "metadata": "aux"},
-    )
+    return {
+        "image": Image(x.numpy(), layout="CHW"),
+        "target": Mask(y.numpy()),
+        "metadata": [{"idx": i} for i in range(n)],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +119,7 @@ def test_metrics_are_wired_with_correct_prefixes() -> None:
     assert "train/dice_macro" in train_keys
 
 
-def test_default_loader_uses_typed_collate() -> None:
+def test_default_loader_uses_collate_records() -> None:
     from confluid.fluid import Class as ConfluidClass
 
     trainer = LightningSegmenter(
@@ -130,9 +128,9 @@ def test_default_loader_uses_typed_collate() -> None:
         num_classes=2,
     )
     assert isinstance(trainer.train_loader, ConfluidClass)
-    assert trainer.train_loader.kwargs.get("collate_fn") is typed_collate
+    assert trainer.train_loader.kwargs.get("collate_fn") is collate_records
     assert isinstance(trainer.val_loader, ConfluidClass)
-    assert trainer.val_loader.kwargs.get("collate_fn") is typed_collate
+    assert trainer.val_loader.kwargs.get("collate_fn") is collate_records
 
 
 # ---------------------------------------------------------------------------

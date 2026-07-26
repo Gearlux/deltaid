@@ -44,7 +44,7 @@ from marainer.run_names import generate_run_name
 from marainer.torch import ensure_sample_dataset
 from marainer.tracking.base import Tracker
 from pytorch_lightning.loggers import Logger
-from sampleflux import Label, Sample, item_data, primary, typed_collate
+from sampleflux import Label, Record, collate_records, item_data
 from sampleflux.runnable import ProgressReporting, TorchRunner, entrypoint
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
@@ -68,29 +68,28 @@ def _default_segmentation_metrics(num_classes: int, ignore_index: int) -> Metric
     )
 
 
-def _batch_input(batch: Sample) -> torch.Tensor:
-    """The ``[N, 3, H, W]`` input tensor from a :func:`~sampleflux.typed_collate` batch.
+def _batch_input(batch: Record, key: str) -> torch.Tensor:
+    """The ``[N, 3, H, W]`` input tensor under ``key`` in a :func:`~sampleflux.collate_records` batch.
 
-    The generic typed collate stacks the primary ``input`` :class:`~sampleflux.Image` field; an Image
-    cannot hold a live tensor (``NDArrayItem.__new__`` runs ``np.asarray``), so its payload comes back
-    as an ndarray and is converted here with a cheap, memory-sharing ``torch.as_tensor`` — the pipeline
-    already tensorized the per-sample image (``ConvertToImageOp`` → ``ToTensorOp``), so collate just
-    stacks and this only unwraps.
+    The record collate stacks an array/tensor payload per key (``ToTensor`` upstream emits a live
+    CHW tensor, so the stack is already a tensor) and leaves plain values as per-record lists —
+    both shapes normalize here with a cheap, memory-sharing ``torch.as_tensor``.
     """
-    _, item = primary(batch, "input")
-    data = item_data(item)
+    data = item_data(batch[key])
+    if isinstance(data, list):
+        return torch.stack([torch.as_tensor(v) for v in data])
     return data if isinstance(data, torch.Tensor) else torch.as_tensor(np.asarray(data))
 
 
-def _batch_target(batch: Sample) -> torch.Tensor:
-    """The ``[N, H, W]`` int64 target-mask tensor from a :func:`~sampleflux.typed_collate` batch.
+def _batch_target(batch: Record, key: str) -> torch.Tensor:
+    """The ``[N, H, W]`` int64 target-mask tensor under ``key`` in a :func:`~sampleflux.collate_records` batch.
 
-    The primary ``target`` :class:`~sampleflux.Mask` is fully stackable, so the generic typed collate
-    stacks it to ``[N, H, W]`` and its payload comes back as an ndarray (converted with ``torch.as_tensor``
-    and promoted to ``int64`` for the pixel-class-id CrossEntropy contract). A defensive
-    :class:`~sampleflux.Label` target (a per-sample list the typed collate does NOT stack) is stacked here.
+    The target :class:`~sampleflux.Mask` is fully stackable, so the record collate stacks it to
+    ``[N, H, W]`` (converted with ``torch.as_tensor`` and promoted to ``int64`` for the
+    pixel-class-id CrossEntropy contract). A defensive :class:`~sampleflux.Label` target (a
+    per-record list the collate does NOT stack) is stacked here.
     """
-    _, item = primary(batch, "target")
+    item = batch[key]
     data = item.value if isinstance(item, Label) else item_data(item)
     if isinstance(data, list):
         data = torch.stack([torch.as_tensor(v) for v in data])
@@ -99,24 +98,19 @@ def _batch_target(batch: Sample) -> torch.Tensor:
     return data if data.dtype == torch.int64 else data.long()
 
 
-def _batch_metadata(batch: Sample) -> Optional[List[Dict[str, Any]]]:
-    """Per-sample metadata dicts recovered from a batched :class:`~sampleflux.Sample`.
+def _batch_metadata(batch: Record, input_key: str, target_key: str) -> Optional[List[Dict[str, Any]]]:
+    """Per-record metadata dicts recovered from a batched record.
 
-    A :func:`~sampleflux.typed_collate` batch carries the non-primary (aux) fields as their own
-    per-sample lists (a :class:`~sampleflux.Label`'s ``.value`` is a list, an array item a stacked
-    payload) — transpose them into a list-of-dicts so predictions sinks can correlate outputs to
-    source samples. A hand-built batch that instead carries a single list-valued ``"metadata"`` field
+    A :func:`~sampleflux.collate_records` batch carries the non-primary keys as per-record
+    lists (a :class:`~sampleflux.Label`'s ``.value`` is a list, a plain value a plain list) —
+    transpose them into a list-of-dicts so predictions sinks can correlate outputs to source
+    records. A hand-built batch that instead carries a single list-valued ``"metadata"`` key
     is returned verbatim.
     """
     if "metadata" in batch and isinstance(batch["metadata"], list):
         return list(batch["metadata"])
-    input_key = primary(batch, "input")[0]
-    try:
-        target_key: Any = primary(batch, "target")[0]
-    except KeyError:
-        target_key = None
     columns: Dict[str, Any] = {}
-    for key in batch.keys():
+    for key in batch:
         if key in (input_key, target_key):
             continue
         item = batch[key]
@@ -139,6 +133,8 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
             to read it off a concrete model head.
         ignore_index: Pixel value skipped by loss + metrics.
         task: Entry point :meth:`run` dispatches to.
+        input_key: Record key carrying the model input tensor. Defaults to ``image``.
+        target_key: Record key carrying the target mask. Defaults to ``target`` (the target ops' output default).
         max_epochs / batch_size / num_workers / logger: ergonomic flat-config knobs.
         experiment_name / run_name: tracking identity.
 
@@ -154,6 +150,8 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         test_set: Any = None,
         num_classes: Optional[int] = None,
         ignore_index: int = -100,
+        input_key: str = "image",
+        target_key: str = "target",
         task: SegmenterTask = "fit",
         max_epochs: int = 10,
         batch_size: int = 8,
@@ -169,13 +167,15 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         self.test_set: Any = test_set
         self.num_classes = int(num_classes) if num_classes is not None else None
         self.ignore_index = int(ignore_index)
+        self.input_key = str(input_key)
+        self.target_key = str(target_key)
         self.task: SegmenterTask = task
         self.experiment_name = experiment_name
         self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
         self.loss_fn: nn.Module = nn.CrossEntropyLoss(ignore_index=self.ignore_index)
         self.optimizer: Any = LazyClass(torch.optim.AdamW, lr=1e-4, weight_decay=0.05)
         loader_kw = dict(
-            collate_fn=typed_collate,
+            collate_fn=collate_records,
             batch_size=batch_size,
             num_workers=num_workers,
             persistent_workers=num_workers != 0,
@@ -238,7 +238,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
 
     # ---- standard Lightning step functions ---------------------------------- #
     def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        x, y = _batch_input(batch), _batch_target(batch)
+        x, y = _batch_input(batch, self.input_key), _batch_target(batch, self.target_key)
         preds = self(x)
         loss: torch.Tensor = self.loss_fn(preds, y)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
@@ -252,7 +252,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
             self.train_metrics.reset()
 
     def validation_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        x, y = _batch_input(batch), _batch_target(batch)
+        x, y = _batch_input(batch, self.input_key), _batch_target(batch, self.target_key)
         preds = self(x)
         loss: torch.Tensor = self.loss_fn(preds, y)
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
@@ -262,17 +262,17 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         return loss
 
     def test_step(self, batch: Any, batch_idx: int) -> Any:
-        x = _batch_input(batch)
+        x = _batch_input(batch, self.input_key)
         preds = self(x)
         if isinstance(self.test_metrics, MetricCollection):
-            self.test_metrics.update(preds, _batch_target(batch))
+            self.test_metrics.update(preds, _batch_target(batch, self.target_key))
             self.log_dict(self.test_metrics, on_step=False, on_epoch=True, batch_size=x.shape[0])
         if self.predictions_sink is not None:
             self._write_predictions(preds, batch)
         return preds
 
     def predict_step(self, batch: Any, batch_idx: int) -> Any:
-        preds = self(_batch_input(batch))
+        preds = self(_batch_input(batch, self.input_key))
         if self.predictions_sink is not None:
             self._write_predictions(preds, batch)
         return preds
@@ -357,7 +357,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
 
     # ---- predictions + metrics ---------------------------------------------- #
     def _write_predictions(self, preds: Any, batch: Any) -> None:
-        per_sample_meta = _batch_metadata(batch) if isinstance(batch, Sample) else None
+        per_sample_meta = _batch_metadata(batch, self.input_key, self.target_key) if isinstance(batch, dict) else None
         items = (
             preds["predictions"]
             if isinstance(preds, dict) and "predictions" in preds

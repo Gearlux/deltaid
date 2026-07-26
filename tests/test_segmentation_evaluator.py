@@ -8,7 +8,7 @@ import pytorch_lightning as L
 import torch
 import torch.nn as nn
 from confluid import Class
-from sampleflux import Image, Label, Mask, Sample, typed_collate
+from sampleflux import Image, Mask, Record, collate_records
 from sampleflux.core import Flux
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
@@ -34,26 +34,24 @@ class _TinySegmenter(nn.Module):
 
 def _make_flux(n: int = 8, num_classes: int = 2, h: int = 8, w: int = 8) -> Flux:
     samples = [
-        Sample(
-            {
-                "image": Image(np.random.randn(3, h, w).astype("float32"), layout="CHW"),
-                "mask": Mask(np.random.randint(0, num_classes, (h, w)).astype("int64")),
-                "idx": Label(i),
-            },
-            roles={"mask": "target", "idx": "aux"},
-        )
+        {
+            "image": Image(np.random.randn(3, h, w).astype("float32"), layout="CHW"),
+            "target": Mask(np.random.randint(0, num_classes, (h, w)).astype("int64")),
+            "idx": i,
+        }
         for i in range(n)
     ]
     return Flux(source=samples)
 
 
-def _make_batch(n: int = 4, num_classes: int = 2, h: int = 8, w: int = 8) -> Sample:
+def _make_batch(n: int = 4, num_classes: int = 2, h: int = 8, w: int = 8) -> Record:
     x = torch.randn(n, 3, h, w)
     y = torch.randint(0, num_classes, (n, h, w), dtype=torch.int64)
-    return Sample(
-        {"image": Image(x.numpy(), layout="CHW"), "mask": Mask(y.numpy()), "metadata": [{"idx": i} for i in range(n)]},
-        roles={"mask": "target", "metadata": "aux"},
-    )
+    return {
+        "image": Image(x.numpy(), layout="CHW"),
+        "target": Mask(y.numpy()),
+        "metadata": [{"idx": i} for i in range(n)],
+    }
 
 
 class _RecordingSink:
@@ -89,12 +87,12 @@ def test_ignore_index_flows_into_default_metrics() -> None:
     assert ev.test_metrics["test/dice_macro"].ignore_index == 255  # type: ignore[attr-defined]
 
 
-def test_default_loader_uses_typed_collate() -> None:
+def test_default_loader_uses_collate_records() -> None:
     from confluid.fluid import Class as ConfluidClass
 
     ev = _evaluator(model=_TinySegmenter(num_classes=2), dataset=_make_flux(8), num_classes=2)
     assert isinstance(ev.test_loader, ConfluidClass)
-    assert ev.test_loader.kwargs.get("collate_fn") is typed_collate
+    assert ev.test_loader.kwargs.get("collate_fn") is collate_records
 
 
 def test_test_step_updates_metrics() -> None:
@@ -125,7 +123,7 @@ def test_evaluator_run_writes_metrics_sidecar(tmp_path: Any) -> None:
         experiment_name="seg_test_exp",
         run_name="seg_test_run",
     )
-    ev.test_loader = Class(DataLoader, batch_size=4, collate_fn=typed_collate)
+    ev.test_loader = Class(DataLoader, batch_size=4, collate_fn=collate_records)
     ev.lightning = Class(
         L.Trainer,
         accelerator="cpu",
@@ -148,7 +146,7 @@ def test_evaluator_run_writes_metrics_sidecar(tmp_path: Any) -> None:
 def test_evaluator_writes_to_predictions_sink(tmp_path: Any) -> None:
     sink = _RecordingSink()
     ev = _evaluator(model=_TinySegmenter(num_classes=2), dataset=_make_flux(8), num_classes=2)
-    ev.test_loader = Class(DataLoader, batch_size=4, collate_fn=typed_collate)
+    ev.test_loader = Class(DataLoader, batch_size=4, collate_fn=collate_records)
     ev.predictions_sink = sink
     ev.lightning = Class(
         L.Trainer,
