@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from sampleflux import Image, Mask, Record, collate_records
+from recordstream import Image, Mask, Record, collate_records
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 
@@ -25,7 +25,7 @@ class _TinySegmenter(nn.Module):
         return self.head(x)  # type: ignore[no-any-return]
 
 
-def _make_samples(n: int = 8, num_classes: int = 2, h: int = 8, w: int = 8) -> list[Record]:
+def _make_records(n: int = 8, num_classes: int = 2, h: int = 8, w: int = 8) -> list[Record]:
     return [
         {
             "image": Image(np.random.randn(3, h, w).astype("float32"), layout="CHW"),
@@ -78,7 +78,7 @@ def test_loss_fn_is_torch_cross_entropy() -> None:
     """Default loss is torch.nn.CrossEntropyLoss — no deltaid adapter class."""
     trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
-        train_set=_make_samples(8),
+        train_set=_make_records(8),
         num_classes=2,
     )
     assert isinstance(trainer.loss_fn, nn.CrossEntropyLoss)
@@ -88,7 +88,7 @@ def test_loss_fn_is_torch_cross_entropy() -> None:
 def test_ignore_index_flows_into_default_loss_and_metrics() -> None:
     trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=3),
-        train_set=_make_samples(8, num_classes=3),
+        train_set=_make_records(8, num_classes=3),
         num_classes=3,
         ignore_index=255,
     )
@@ -103,7 +103,7 @@ def test_ignore_index_flows_into_default_loss_and_metrics() -> None:
 def test_metrics_are_wired_with_correct_prefixes() -> None:
     trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
-        train_set=_make_samples(8),
+        train_set=_make_records(8),
         num_classes=2,
     )
     assert trainer.train_metrics is not None
@@ -124,7 +124,7 @@ def test_default_loader_uses_collate_records() -> None:
 
     trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
-        train_set=_make_samples(8),
+        train_set=_make_records(8),
         num_classes=2,
     )
     assert isinstance(trainer.train_loader, ConfluidClass)
@@ -141,7 +141,7 @@ def test_default_loader_uses_collate_records() -> None:
 def test_training_step_returns_scalar_loss() -> None:
     trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
-        train_set=_make_samples(8),
+        train_set=_make_records(8),
         num_classes=2,
     )
     batch = _make_batch(n=4, num_classes=2)
@@ -154,7 +154,7 @@ def test_training_step_returns_scalar_loss() -> None:
 def test_validation_step_returns_scalar_loss() -> None:
     trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
-        train_set=_make_samples(8),
+        train_set=_make_records(8),
         num_classes=2,
     )
     batch = _make_batch(n=4, num_classes=2)
@@ -166,7 +166,7 @@ def test_validation_step_returns_scalar_loss() -> None:
 def test_metrics_update_on_training_step() -> None:
     trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
-        train_set=_make_samples(8),
+        train_set=_make_records(8),
         num_classes=2,
     )
     batch = _make_batch(n=4, num_classes=2)
@@ -190,7 +190,7 @@ def test_user_can_override_loss_fn_with_any_upstream_class() -> None:
     """
     trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
-        train_set=_make_samples(8),
+        train_set=_make_records(8),
         num_classes=2,
     )
     weighted_ce = nn.CrossEntropyLoss(weight=torch.tensor([1.0, 5.0]), ignore_index=-100)
@@ -204,7 +204,7 @@ def test_user_can_override_loss_fn_with_any_upstream_class() -> None:
 def test_user_can_override_val_metrics_with_torchmetrics_class() -> None:
     trainer = LightningSegmenter(
         model=_TinySegmenter(num_classes=2),
-        train_set=_make_samples(8),
+        train_set=_make_records(8),
         num_classes=2,
     )
     # Replace the default MetricCollection with a single bare torchmetrics metric.

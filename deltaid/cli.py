@@ -3,7 +3,7 @@
 ``deltaid train`` / ``deltaid evaluate`` / ``deltaid predict`` bind the single
 :class:`~deltaid.segmenter.LightningSegmenter` (a standard Lightning module) and run
 it with the matching ``task`` (the verb wins over the YAML's ``task:``). A generic
-``sampleflux run config.yaml`` also works.
+``recordstream run config.yaml`` also works.
 """
 
 from typing import Any

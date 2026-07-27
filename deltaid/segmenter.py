@@ -4,7 +4,7 @@ A self-contained ``pytorch_lightning.LightningModule`` — its own ``training_st
 ``validation_step`` / ``test_step`` / ``predict_step`` / ``configure_optimizers``, and a
 ``run()`` that builds the loaders + ``pl.Trainer`` and calls ``fit`` / ``test`` / ``predict``
 per the ``task`` knob. It reads like a textbook Lightning example; marainer is used ONLY for
-optional experiment tracking and the small ``ensure_sample_dataset`` utility. Remove marainer and
+optional experiment tracking and the small ``ensure_record_dataset`` utility. Remove marainer and
 this class still trains.
 
 Segmentation specifics it owns: ``ignore_index``-aware ``CrossEntropyLoss`` + the mean-IoU / Dice
@@ -20,7 +20,7 @@ Minimal flat YAML::
     train_set: !ref:train_set
     val_set: !ref:val_set
 
-    sampleflux run train.yaml
+    recordstream run train.yaml
 """
 
 import json
@@ -41,11 +41,11 @@ from marainer.lightning import (
     scalar_metrics,
 )
 from marainer.run_names import generate_run_name
-from marainer.torch import ensure_sample_dataset
+from marainer.torch import ensure_record_dataset
 from marainer.tracking.base import Tracker
 from pytorch_lightning.loggers import Logger
-from sampleflux import Label, Record, collate_records, item_data
-from sampleflux.runnable import ProgressReporting, TorchRunner, entrypoint
+from recordstream import Label, Record, collate_records, item_data
+from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
@@ -69,7 +69,7 @@ def _default_segmentation_metrics(num_classes: int, ignore_index: int) -> Metric
 
 
 def _batch_input(batch: Record, key: str) -> torch.Tensor:
-    """The ``[N, 3, H, W]`` input tensor under ``key`` in a :func:`~sampleflux.collate_records` batch.
+    """The ``[N, 3, H, W]`` input tensor under ``key`` in a :func:`~recordstream.collate_records` batch.
 
     The record collate stacks an array/tensor payload per key (``ToTensor`` upstream emits a live
     CHW tensor, so the stack is already a tensor) and leaves plain values as per-record lists —
@@ -82,11 +82,11 @@ def _batch_input(batch: Record, key: str) -> torch.Tensor:
 
 
 def _batch_target(batch: Record, key: str) -> torch.Tensor:
-    """The ``[N, H, W]`` int64 target-mask tensor under ``key`` in a :func:`~sampleflux.collate_records` batch.
+    """The ``[N, H, W]`` int64 target-mask tensor under ``key`` in a :func:`~recordstream.collate_records` batch.
 
-    The target :class:`~sampleflux.Mask` is fully stackable, so the record collate stacks it to
+    The target :class:`~recordstream.Mask` is fully stackable, so the record collate stacks it to
     ``[N, H, W]`` (converted with ``torch.as_tensor`` and promoted to ``int64`` for the
-    pixel-class-id CrossEntropy contract). A defensive :class:`~sampleflux.Label` target (a
+    pixel-class-id CrossEntropy contract). A defensive :class:`~recordstream.Label` target (a
     per-record list the collate does NOT stack) is stacked here.
     """
     item = batch[key]
@@ -101,8 +101,8 @@ def _batch_target(batch: Record, key: str) -> torch.Tensor:
 def _batch_metadata(batch: Record, input_key: str, target_key: str) -> Optional[List[Dict[str, Any]]]:
     """Per-record metadata dicts recovered from a batched record.
 
-    A :func:`~sampleflux.collate_records` batch carries the non-primary keys as per-record
-    lists (a :class:`~sampleflux.Label`'s ``.value`` is a list, a plain value a plain list) —
+    A :func:`~recordstream.collate_records` batch carries the non-primary keys as per-record
+    lists (a :class:`~recordstream.Label`'s ``.value`` is a list, a plain value a plain list) —
     transpose them into a list-of-dicts so predictions sinks can correlate outputs to source
     records. A hand-built batch that instead carries a single list-valued ``"metadata"`` key
     is returned verbatim.
@@ -127,8 +127,8 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
 
     Args:
         model: Segmentation model emitting ``[N, num_classes, H, W]`` logits.
-        train_set: Training dataset / Flux (for ``task="fit"``).
-        test_set: Held-out eval dataset / Flux (for ``task="test"`` / ``"predict"``).
+        train_set: Training dataset / Stream (for ``task="fit"``).
+        test_set: Held-out eval dataset / Stream (for ``task="test"`` / ``"predict"``).
         num_classes: Number of output classes (incl. background); drives metric construction. Omit
             to read it off a concrete model head.
         ignore_index: Pixel value skipped by loss + metrics.
@@ -286,9 +286,9 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         logger.info(f"deltaid training: {self.experiment_name} ({self.run_name})")
         if self.train_set is None:
             raise ValueError("LightningSegmenter.fit() requires a 'train_set'.")
-        train_ds = ensure_sample_dataset(flow(self.train_set))
-        val_ds = ensure_sample_dataset(flow(self.val_set)) if self.val_set is not None else None
-        test_ds = ensure_sample_dataset(flow(self.test_set)) if self.test_set is not None else None
+        train_ds = ensure_record_dataset(flow(self.train_set))
+        val_ds = ensure_record_dataset(flow(self.val_set)) if self.val_set is not None else None
+        test_ds = ensure_record_dataset(flow(self.test_set)) if self.test_set is not None else None
         t_loader = flow(self.train_loader, dataset=train_ds)
         v_loader = flow(self.val_loader, dataset=val_ds) if val_ds is not None else None
         trainer = self._build_trainer()
@@ -310,7 +310,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         logger.info(f"deltaid predicting: {self.experiment_name} ({self.run_name})")
         if self.test_set is None:
             raise ValueError("LightningSegmenter.predict() requires a 'test_set'.")
-        dataset = ensure_sample_dataset(flow(self.test_set))
+        dataset = ensure_record_dataset(flow(self.test_set))
         if self.predictions_sink is not None:
             self.predictions_sink = flow(self.predictions_sink)
         loader = flow(self.test_loader, dataset=dataset)
@@ -324,7 +324,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         source = getattr(self, dataset_slot)
         if source is None:
             raise ValueError(f"LightningSegmenter.{stage}() requires a '{dataset_slot}'.")
-        dataset = ensure_sample_dataset(flow(source))
+        dataset = ensure_record_dataset(flow(source))
         if self.predictions_sink is not None:
             self.predictions_sink = flow(self.predictions_sink)
         loader = flow(getattr(self, loader_slot), dataset=dataset)
@@ -357,14 +357,14 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
 
     # ---- predictions + metrics ---------------------------------------------- #
     def _write_predictions(self, preds: Any, batch: Any) -> None:
-        per_sample_meta = _batch_metadata(batch, self.input_key, self.target_key) if isinstance(batch, dict) else None
+        per_record_meta = _batch_metadata(batch, self.input_key, self.target_key) if isinstance(batch, dict) else None
         items = (
             preds["predictions"]
             if isinstance(preds, dict) and "predictions" in preds
             else (preds if isinstance(preds, list) else [preds])
         )
         for i in range(len(items)):
-            m = per_sample_meta[i] if per_sample_meta and i < len(per_sample_meta) else {}
+            m = per_record_meta[i] if per_record_meta and i < len(per_record_meta) else {}
             self.predictions_sink.write(items[i], m)
 
     def _finalize_metrics(self, metrics: Any) -> None:
