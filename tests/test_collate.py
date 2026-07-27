@@ -1,8 +1,8 @@
-"""Tests for the segmenter's use of the generic :func:`sampleflux.collate_records`.
+"""Tests for the segmenter's use of the generic :func:`recordstream.collate_records`.
 
 Deltaid no longer ships a bespoke segmentation collate: the segmentation record (an
-:class:`~sampleflux.Image` input under ``"image"`` + a fully-stackable :class:`~sampleflux.Mask`
-target under ``"target"``) is collated by ``sampleflux.collate_records`` and the model boundary
+:class:`~recordstream.Image` input under ``"image"`` + a fully-stackable :class:`~recordstream.Mask`
+target under ``"target"``) is collated by ``recordstream.collate_records`` and the model boundary
 recovers the batched tensors via ``deltaid.segmenter._batch_input`` / ``_batch_target`` (and
 per-record metadata via ``_batch_metadata``).
 """
@@ -10,12 +10,12 @@ per-record metadata via ``_batch_metadata``).
 import numpy as np
 import pytest
 import torch
-from sampleflux import Image, Label, Mask, Record, collate_records, item_data
+from recordstream import Image, Label, Mask, Record, collate_records, item_data
 
 from deltaid.segmenter import _batch_input, _batch_metadata, _batch_target
 
 
-def _make_sample(value: int = 0, h: int = 8, w: int = 8) -> Record:
+def _make_record(value: int = 0, h: int = 8, w: int = 8) -> Record:
     """A per-record dict shaped like a segmentation source: Image + Mask target + plain meta keys."""
     return {
         "image": Image(np.full((3, h, w), float(value), dtype="float32"), layout="CHW"),
@@ -26,7 +26,7 @@ def _make_sample(value: int = 0, h: int = 8, w: int = 8) -> Record:
 
 
 def test_collate_stacks_inputs_and_targets() -> None:
-    batch = collate_records([_make_sample(0), _make_sample(1), _make_sample(2)])
+    batch = collate_records([_make_record(0), _make_record(1), _make_record(2)])
     assert isinstance(batch, dict)
     x = _batch_input(batch, "image")
     y = _batch_target(batch, "target")
@@ -39,7 +39,7 @@ def test_collate_stacks_inputs_and_targets() -> None:
 
 def test_collate_preserves_string_metadata_as_list() -> None:
     """Strings can't be torch.stack'd — they MUST survive as a per-record metadata list."""
-    batch = collate_records([_make_sample(0), _make_sample(1)])
+    batch = collate_records([_make_record(0), _make_record(1)])
     metas = _batch_metadata(batch, "image", "target")
     assert isinstance(metas, list)
     assert len(metas) == 2
@@ -84,7 +84,7 @@ def test_batch_metadata_reads_legacy_metadata_field() -> None:
 
 
 def test_collate_input_is_image_target_is_mask() -> None:
-    batch = collate_records([_make_sample(0) for _ in range(2)])
+    batch = collate_records([_make_record(0) for _ in range(2)])
     image_item = batch["image"]
     mask_item = batch["target"]
     # collate_records gathers each item attr (e.g. Image.layout) as a per-record list.

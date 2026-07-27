@@ -50,11 +50,11 @@ runnable: !class:deltaid.LightningSegmenter
     encoder_name: resnet34
     encoder_weights: imagenet
 
-  train_set: !ref:train_set   # a sampleflux Flux yielding (image tensor, mask) samples
+  train_set: !ref:train_set   # a recordstream Stream yielding (image tensor, mask) records
   val_set: !ref:val_set
 
   # Loss (ignore_index CrossEntropyLoss), the mean-IoU / Dice metrics,
-  # sampleflux.collate_records, and AdamW are baked in as defaults. Override any of
+  # recordstream.collate_records, and AdamW are baked in as defaults. Override any of
   # them with an upstream-library class — no deltaid adapter wrapper exists:
   # loss_fn: !class:torch.nn.CrossEntropyLoss
   #   weight: [1.0, 5.0]      # bump foreground if pixels are scarce
@@ -77,20 +77,20 @@ typical pipeline:
 
 1. `RegionsJsonSource` reads per-window annotations.
 2. `waivefront.spectrogram.Spectrogram` → `Magnitude` →
-   `sampleflux.ops.image.ConvertToImage` render the IQ → spectrogram → PIL image.
+   `recordstream.ops.image.ConvertToImage` render the IQ → spectrogram → PIL image.
 3. `waivefront.targets.RegionsToSegmentationMaskOp` rasterizes the signal-region
    annotations into a per-pixel int64 mask as the target-role `Mask` item (the
-   input stays a PIL image), then `sampleflux.ops.torch.ToTensor` turns it into
+   input stays a PIL image), then `recordstream.ops.torch.ToTensor` turns it into
    the `[3, H, W]` input tensor.
 4. `deltaid.deeplabv3plus.DeepLabV3PlusModel` consumes the image and emits
    per-pixel class logits.
 5. `LightningSegmenter`'s built-in `ignore_index` `CrossEntropyLoss` trains it.
 
-Run (the per-project CLI, or the generic `sampleflux run`):
+Run (the per-project CLI, or the generic `recordstream run`):
 
 ```bash
 deltaid train waivefront/config/train_deeplabv3plus.yaml
-# or: sampleflux run waivefront/config/train_deeplabv3plus.yaml
+# or: recordstream run waivefront/config/train_deeplabv3plus.yaml
 ```
 
 ## Models
@@ -109,7 +109,7 @@ Any encoder name supported by smp works (`resnet50`, `efficientnet-b0`,
 
 | Symbol | Purpose |
 |--------|---------|
-| `sampleflux.collate_records` | The generic DataLoader collate the segmenter wires in (no bespoke deltaid collate). Stacks the input under `input_key` (default `image`) and the fully-stackable `[H, W]` `Mask` target under `target_key` (default `target`) into batched tensors, keeping the other record keys as per-record lists. It is the segmenter's default loader `collate_fn`. |
+| `recordstream.collate_records` | The generic DataLoader collate the segmenter wires in (no bespoke deltaid collate). Stacks the input under `input_key` (default `image`) and the fully-stackable `[H, W]` `Mask` target under `target_key` (default `target`) into batched tensors, keeping the other record keys as per-record lists. It is the segmenter's default loader `collate_fn`. |
 
 The loss is not a deltaid class — `LightningSegmenter` builds a plain
 `torch.nn.CrossEntropyLoss(ignore_index=...)` internally. Pass any upstream-library
@@ -143,7 +143,7 @@ See marainer's README → *Loading checkpoints* for the accepted formats.
 |---------|---------|
 | `marainer` | Optional experiment tracking + `marainer.torch` utilities (checkpoint loading). |
 | `confluid` | YAML-driven dependency injection (`@configurable`, `!class:`, `!ref:`). |
-| `sampleflux` | Sample / Flux pipeline plumbing. |
+| `recordstream` | Record / Stream pipeline plumbing. |
 | `loggair` | Structured logging. |
 | `segmentation-models-pytorch` | Underlying smp segmentation model implementations. |
 | `torch`, `torchvision`, `torchmetrics`, `pytorch-lightning` | Standard PyTorch stack. |
