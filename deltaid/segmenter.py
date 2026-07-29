@@ -237,9 +237,9 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         logger.info(f"deltaid training: {self.experiment_name} ({self.run_name})")
         if self.train_set is None:
             raise ValueError("LightningSegmenter.fit() requires a 'train_set'.")
-        train_ds = ensure_record_dataset(flow(self.train_set))
-        val_ds = ensure_record_dataset(flow(self.val_set)) if self.val_set is not None else None
-        test_ds = ensure_record_dataset(flow(self.test_set)) if self.test_set is not None else None
+        train_ds = ensure_record_dataset(self.train_set)
+        val_ds = ensure_record_dataset(self.val_set) if self.val_set is not None else None
+        test_ds = ensure_record_dataset(self.test_set) if self.test_set is not None else None
         t_loader = flow(self.train_loader, dataset=train_ds)
         v_loader = flow(self.val_loader, dataset=val_ds) if val_ds is not None else None
         trainer = self._build_trainer()
@@ -261,7 +261,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         logger.info(f"deltaid predicting: {self.experiment_name} ({self.run_name})")
         if self.test_set is None:
             raise ValueError("LightningSegmenter.predict() requires a 'test_set'.")
-        dataset = ensure_record_dataset(flow(self.test_set))
+        dataset = ensure_record_dataset(self.test_set)
         if self.predictions_sink is not None:
             self.predictions_sink = flow(self.predictions_sink)
         loader = flow(self.test_loader, dataset=dataset)
@@ -275,7 +275,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         source = getattr(self, dataset_slot)
         if source is None:
             raise ValueError(f"LightningSegmenter.{stage}() requires a '{dataset_slot}'.")
-        dataset = ensure_record_dataset(flow(source))
+        dataset = ensure_record_dataset(source)
         if self.predictions_sink is not None:
             self.predictions_sink = flow(self.predictions_sink)
         loader = flow(getattr(self, loader_slot), dataset=dataset)
