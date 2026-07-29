@@ -40,11 +40,16 @@ from marainer.lightning import (
     scalar_metrics,
 )
 from marainer.run_names import generate_run_name
-from marainer.sinks import PredictionsSink
-from marainer.torch import RecordSource, ensure_record_dataset
 from marainer.tracking.base import Tracker
 from pytorch_lightning.loggers import Logger
-from recordstream import batch_metadata, batch_tensor, collate_records
+from recordstream import (
+    PredictionsSink,
+    RecordSource,
+    batch_metadata,
+    batch_tensor,
+    collate_records,
+    ensure_record_dataset,
+)
 from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint, run_entrypoint
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
