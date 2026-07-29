@@ -30,7 +30,7 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Union, cast
 import pytorch_lightning as L
 import torch
 import torch.nn as nn
-from confluid import Fluid, LazyClass, Mandatory, configurable, flow, get_hierarchy_from_instance, output
+from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, get_hierarchy_from_instance, output
 from loggair import get_logger
 from marainer.lightning import (
     TrackingCallback,
@@ -40,11 +40,12 @@ from marainer.lightning import (
     scalar_metrics,
 )
 from marainer.run_names import generate_run_name
-from marainer.torch import ensure_record_dataset
+from marainer.torch import RecordSource, ensure_record_dataset
 from marainer.tracking.base import Tracker
 from pytorch_lightning.loggers import Logger
-from recordstream import Record, batch_metadata, batch_tensor, collate_records
-from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint
+from recordstream import batch_metadata, batch_tensor, collate_records
+from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint, run_entrypoint
+from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
@@ -65,18 +66,6 @@ def _default_segmentation_metrics(num_classes: int, ignore_index: int) -> Metric
             ),
         }
     )
-
-
-def _batch_target(batch: Record, key: str, device: Any = None) -> torch.Tensor:
-    """The SEGMENTATION target: an ``[N, H, W]`` int64 pixel-class-id mask.
-
-    Reading the batch is generic and lives in recordstream
-    (:func:`~recordstream.batch_tensor`, the inverse of ``collate_records``); the only
-    segmentation-specific part is the int64 promotion the pixel-wise CrossEntropy contract
-    needs — a ``uint8`` mask straight off disk would otherwise reach the loss unchanged.
-    """
-    tensor = batch_tensor(batch, key, device)
-    return tensor if tensor.dtype == torch.int64 else tensor.long()
 
 
 @configurable(task="segmentation", role="trainer")
@@ -103,9 +92,9 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
 
     def __init__(
         self,
-        model: Mandatory[nn.Module],
-        train_set: Any = None,
-        test_set: Any = None,
+        model: Mandatory[Lazy[nn.Module]],
+        train_set: Optional[Lazy[RecordSource]] = None,
+        test_set: Optional[Lazy[RecordSource]] = None,
         num_classes: Optional[int] = None,
         ignore_index: int = -100,
         input_key: str = "image",
@@ -119,10 +108,10 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         run_name: Optional[str] = None,
     ) -> None:
         super().__init__()
-        self.model: Any = model
-        self.train_set: Any = train_set
-        self.val_set: Any = None
-        self.test_set: Any = test_set
+        self.model: Lazy[nn.Module] = model
+        self.train_set: Optional[Lazy[RecordSource]] = train_set
+        self.val_set: Optional[Lazy[RecordSource]] = None
+        self.test_set: Optional[Lazy[RecordSource]] = test_set
         self.num_classes = int(num_classes) if num_classes is not None else None
         self.ignore_index = int(ignore_index)
         self.input_key = str(input_key)
@@ -131,17 +120,17 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         self.experiment_name = experiment_name
         self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
         self.loss_fn: nn.Module = nn.CrossEntropyLoss(ignore_index=self.ignore_index)
-        self.optimizer: Any = LazyClass(torch.optim.AdamW, lr=1e-4, weight_decay=0.05)
+        self.optimizer: Lazy[Optimizer] = LazyClass(torch.optim.AdamW, lr=1e-4, weight_decay=0.05)
         loader_kw = dict(
             collate_fn=collate_records,
             batch_size=batch_size,
             num_workers=num_workers,
             persistent_workers=num_workers != 0,
         )
-        self.train_loader: Any = LazyClass(DataLoader, shuffle=True, **loader_kw)
-        self.val_loader: Any = LazyClass(DataLoader, shuffle=False, **loader_kw)
-        self.test_loader: Any = LazyClass(DataLoader, shuffle=False, **loader_kw)
-        self.lightning: Any = LazyClass(L.Trainer, max_epochs=max_epochs, logger=logger)
+        self.train_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=True, **loader_kw)
+        self.val_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=False, **loader_kw)
+        self.test_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=False, **loader_kw)
+        self.lightning: Lazy[L.Trainer] = LazyClass(L.Trainer, max_epochs=max_epochs, logger=logger)
         self.train_metrics: Any = None
         self.val_metrics: Any = None
         self.test_metrics: Any = None
@@ -166,11 +155,9 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
     # ---- run dispatch ------------------------------------------------------- #
     def run(self) -> None:
         self.initialize()
-        dispatch = {"fit": self.fit, "evaluate": self.evaluate, "test": self.test, "predict": self.predict}
-        entry = dispatch.get(self.task)
-        if entry is None:
-            raise ValueError(f"Unknown task {self.task!r}; expected one of {list(dispatch)}.")
-        entry()
+        # The `@entrypoint` markers below ARE the dispatch table — a hand-written
+        # {task: method} dict restates them and drifts (recordstream `docs/runnable.md`).
+        run_entrypoint(self, self.task)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return cast(torch.Tensor, cast(nn.Module, self.model)(x))
@@ -196,7 +183,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
 
     # ---- standard Lightning step functions ---------------------------------- #
     def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        x, y = batch_tensor(batch, self.input_key), _batch_target(batch, self.target_key)
+        x, y = batch_tensor(batch, self.input_key), batch_tensor(batch, self.target_key, dtype=torch.int64)
         preds = self(x)
         loss: torch.Tensor = self.loss_fn(preds, y)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
@@ -210,7 +197,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
             self.train_metrics.reset()
 
     def validation_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        x, y = batch_tensor(batch, self.input_key), _batch_target(batch, self.target_key)
+        x, y = batch_tensor(batch, self.input_key), batch_tensor(batch, self.target_key, dtype=torch.int64)
         preds = self(x)
         loss: torch.Tensor = self.loss_fn(preds, y)
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
@@ -223,7 +210,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         x = batch_tensor(batch, self.input_key)
         preds = self(x)
         if isinstance(self.test_metrics, MetricCollection):
-            self.test_metrics.update(preds, _batch_target(batch, self.target_key))
+            self.test_metrics.update(preds, batch_tensor(batch, self.target_key, dtype=torch.int64))
             self.log_dict(self.test_metrics, on_step=False, on_epoch=True, batch_size=x.shape[0])
         if self.predictions_sink is not None:
             self._write_predictions(preds, batch)
