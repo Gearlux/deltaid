@@ -27,7 +27,6 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Optional, Union, cast
 
-import numpy as np
 import pytorch_lightning as L
 import torch
 import torch.nn as nn
@@ -44,7 +43,7 @@ from marainer.run_names import generate_run_name
 from marainer.torch import ensure_record_dataset
 from marainer.tracking.base import Tracker
 from pytorch_lightning.loggers import Logger
-from recordstream import Label, Record, collate_records, item_data
+from recordstream import Record, batch_metadata, batch_tensor, collate_records
 from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
@@ -68,57 +67,16 @@ def _default_segmentation_metrics(num_classes: int, ignore_index: int) -> Metric
     )
 
 
-def _batch_input(batch: Record, key: str) -> torch.Tensor:
-    """The ``[N, 3, H, W]`` input tensor under ``key`` in a :func:`~recordstream.collate_records` batch.
+def _batch_target(batch: Record, key: str, device: Any = None) -> torch.Tensor:
+    """The SEGMENTATION target: an ``[N, H, W]`` int64 pixel-class-id mask.
 
-    The record collate stacks an array/tensor payload per key (``ToTensor`` upstream emits a live
-    CHW tensor, so the stack is already a tensor) and leaves plain values as per-record lists —
-    both shapes normalize here with a cheap, memory-sharing ``torch.as_tensor``.
+    Reading the batch is generic and lives in recordstream
+    (:func:`~recordstream.batch_tensor`, the inverse of ``collate_records``); the only
+    segmentation-specific part is the int64 promotion the pixel-wise CrossEntropy contract
+    needs — a ``uint8`` mask straight off disk would otherwise reach the loss unchanged.
     """
-    data = item_data(batch[key])
-    if isinstance(data, list):
-        return torch.stack([torch.as_tensor(v) for v in data])
-    return data if isinstance(data, torch.Tensor) else torch.as_tensor(np.asarray(data))
-
-
-def _batch_target(batch: Record, key: str) -> torch.Tensor:
-    """The ``[N, H, W]`` int64 target-mask tensor under ``key`` in a :func:`~recordstream.collate_records` batch.
-
-    The target :class:`~recordstream.Mask` is fully stackable, so the record collate stacks it to
-    ``[N, H, W]`` (converted with ``torch.as_tensor`` and promoted to ``int64`` for the
-    pixel-class-id CrossEntropy contract). A defensive :class:`~recordstream.Label` target (a
-    per-record list the collate does NOT stack) is stacked here.
-    """
-    item = batch[key]
-    data = item.value if isinstance(item, Label) else item_data(item)
-    if isinstance(data, list):
-        data = torch.stack([torch.as_tensor(v) for v in data])
-    elif not isinstance(data, torch.Tensor):
-        data = torch.as_tensor(np.asarray(data))
-    return data if data.dtype == torch.int64 else data.long()
-
-
-def _batch_metadata(batch: Record, input_key: str, target_key: str) -> Optional[List[Dict[str, Any]]]:
-    """Per-record metadata dicts recovered from a batched record.
-
-    A :func:`~recordstream.collate_records` batch carries the non-primary keys as per-record
-    lists (a :class:`~recordstream.Label`'s ``.value`` is a list, a plain value a plain list) —
-    transpose them into a list-of-dicts so predictions sinks can correlate outputs to source
-    records. A hand-built batch that instead carries a single list-valued ``"metadata"`` key
-    is returned verbatim.
-    """
-    if "metadata" in batch and isinstance(batch["metadata"], list):
-        return list(batch["metadata"])
-    columns: Dict[str, Any] = {}
-    for key in batch:
-        if key in (input_key, target_key):
-            continue
-        item = batch[key]
-        columns[key] = item.value if isinstance(item, Label) else item_data(item)
-    if not columns:
-        return None
-    n = min(len(v) for v in columns.values())
-    return [{k: columns[k][i] for k in columns} for i in range(n)]
+    tensor = batch_tensor(batch, key, device)
+    return tensor if tensor.dtype == torch.int64 else tensor.long()
 
 
 @configurable(task="segmentation", role="trainer")
@@ -238,7 +196,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
 
     # ---- standard Lightning step functions ---------------------------------- #
     def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        x, y = _batch_input(batch, self.input_key), _batch_target(batch, self.target_key)
+        x, y = batch_tensor(batch, self.input_key), _batch_target(batch, self.target_key)
         preds = self(x)
         loss: torch.Tensor = self.loss_fn(preds, y)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
@@ -252,7 +210,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
             self.train_metrics.reset()
 
     def validation_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        x, y = _batch_input(batch, self.input_key), _batch_target(batch, self.target_key)
+        x, y = batch_tensor(batch, self.input_key), _batch_target(batch, self.target_key)
         preds = self(x)
         loss: torch.Tensor = self.loss_fn(preds, y)
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
@@ -262,7 +220,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         return loss
 
     def test_step(self, batch: Any, batch_idx: int) -> Any:
-        x = _batch_input(batch, self.input_key)
+        x = batch_tensor(batch, self.input_key)
         preds = self(x)
         if isinstance(self.test_metrics, MetricCollection):
             self.test_metrics.update(preds, _batch_target(batch, self.target_key))
@@ -272,7 +230,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         return preds
 
     def predict_step(self, batch: Any, batch_idx: int) -> Any:
-        preds = self(_batch_input(batch, self.input_key))
+        preds = self(batch_tensor(batch, self.input_key))
         if self.predictions_sink is not None:
             self._write_predictions(preds, batch)
         return preds
@@ -362,7 +320,9 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
 
     # ---- predictions + metrics ---------------------------------------------- #
     def _write_predictions(self, preds: Any, batch: Any) -> None:
-        per_record_meta = _batch_metadata(batch, self.input_key, self.target_key) if isinstance(batch, dict) else None
+        per_record_meta = (
+            batch_metadata(batch, exclude=(self.input_key, self.target_key)) if isinstance(batch, dict) else None
+        )
         items = (
             preds["predictions"]
             if isinstance(preds, dict) and "predictions" in preds

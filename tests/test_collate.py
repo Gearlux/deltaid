@@ -2,17 +2,20 @@
 
 Deltaid no longer ships a bespoke segmentation collate: the segmentation record (an
 :class:`~recordstream.Image` input under ``"image"`` + a fully-stackable :class:`~recordstream.Mask`
-target under ``"target"``) is collated by ``recordstream.collate_records`` and the model boundary
-recovers the batched tensors via ``deltaid.segmenter._batch_input`` / ``_batch_target`` (and
-per-record metadata via ``_batch_metadata``).
+target under ``"target"``) is collated by ``recordstream.collate_records`` and read back at the
+model boundary by the generic ``recordstream.batch_tensor`` / ``batch_metadata``.
+
+The generic read-back behaviour is pinned in recordstream's own ``tests/test_batch.py`` — what
+remains here is the SEGMENTATION-specific part: ``deltaid.segmenter._batch_target``'s int64
+promotion for the pixel-class-id CrossEntropy contract, and this record shape round-tripping.
 """
 
 import numpy as np
 import pytest
 import torch
-from recordstream import Image, Label, Mask, Record, collate_records, item_data
+from recordstream import Image, Label, Mask, Record, batch_metadata, batch_tensor, collate_records, item_data
 
-from deltaid.segmenter import _batch_input, _batch_metadata, _batch_target
+from deltaid.segmenter import _batch_target
 
 
 def _make_record(value: int = 0, h: int = 8, w: int = 8) -> Record:
@@ -28,7 +31,7 @@ def _make_record(value: int = 0, h: int = 8, w: int = 8) -> Record:
 def test_collate_stacks_inputs_and_targets() -> None:
     batch = collate_records([_make_record(0), _make_record(1), _make_record(2)])
     assert isinstance(batch, dict)
-    x = _batch_input(batch, "image")
+    x = batch_tensor(batch, "image")
     y = _batch_target(batch, "target")
     assert x.shape == (3, 3, 8, 8)
     assert y.shape == (3, 8, 8)
@@ -40,7 +43,7 @@ def test_collate_stacks_inputs_and_targets() -> None:
 def test_collate_preserves_string_metadata_as_list() -> None:
     """Strings can't be torch.stack'd — they MUST survive as a per-record metadata list."""
     batch = collate_records([_make_record(0), _make_record(1)])
-    metas = _batch_metadata(batch, "image", "target")
+    metas = batch_metadata(batch, exclude=("image", "target"))
     assert isinstance(metas, list)
     assert len(metas) == 2
     assert metas[0]["pack_id"] == "pack0"
@@ -48,11 +51,13 @@ def test_collate_preserves_string_metadata_as_list() -> None:
 
 
 def test_batch_target_promotes_non_int64_masks() -> None:
+    """The one thing the generic reader deliberately does NOT do — a dtype opinion is per-task."""
     record: Record = {
         "image": Image(np.zeros((3, 4, 4), dtype="float32"), layout="CHW"),
         "target": Mask(np.zeros((4, 4), dtype="int32")),
     }
-    assert _batch_target(collate_records([record]), "target").dtype == torch.int64
+    assert batch_tensor(collate_records([record]), "target").dtype == torch.int32  # generic: as-is
+    assert _batch_target(collate_records([record]), "target").dtype == torch.int64  # segmenter: promoted
 
 
 def test_batch_target_stacks_defensive_label_list() -> None:
@@ -63,24 +68,6 @@ def test_batch_target_stacks_defensive_label_list() -> None:
     assert isinstance(batch["target"].value, list)  # collate_records did NOT stack it
     y = _batch_target(batch, "target")
     assert y.shape == (3,) and y.dtype == torch.int64
-
-
-def test_batch_metadata_none_without_extra_keys() -> None:
-    record: Record = {
-        "image": Image(np.zeros((3, 4, 4), dtype="float32"), layout="CHW"),
-        "target": Mask(np.zeros((4, 4), dtype="int64")),
-    }
-    assert _batch_metadata(collate_records([record]), "image", "target") is None
-
-
-def test_batch_metadata_reads_legacy_metadata_field() -> None:
-    """A hand-built batch carrying a single list-valued ``metadata`` key is returned verbatim."""
-    batch: Record = {
-        "image": Image(np.zeros((2, 3, 4, 4), dtype="float32"), layout="CHW"),
-        "target": Mask(np.zeros((2, 4, 4), dtype="int64")),
-        "metadata": [{"idx": 0}, {"idx": 1}],
-    }
-    assert _batch_metadata(batch, "image", "target") == [{"idx": 0}, {"idx": 1}]
 
 
 def test_collate_input_is_image_target_is_mask() -> None:
@@ -98,3 +85,7 @@ def test_collate_input_is_image_target_is_mask() -> None:
 def test_collate_records_rejects_empty_batch() -> None:
     with pytest.raises(ValueError, match="empty batch"):
         collate_records([])
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
