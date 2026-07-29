@@ -1,13 +1,17 @@
 """Tests for LightningSegmenter."""
 
+from typing import Any, List, cast, get_args
+
 import numpy as np
+import pytest
 import torch
 import torch.nn as nn
 from recordstream import Image, Mask, Record, collate_records
+from recordstream.runnable import runnable_entrypoints
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 
-from deltaid.segmenter import LightningSegmenter, _default_segmentation_metrics
+from deltaid.segmenter import LightningSegmenter, SegmenterTask, _default_segmentation_metrics
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -214,3 +218,25 @@ def test_user_can_override_val_metrics_with_torchmetrics_class() -> None:
     trainer.validation_step(batch, 0)
     assert "val/f1_only" in trainer.val_metrics.keys()
     assert len(list(trainer.val_metrics.keys())) == 1
+
+
+# ---------------------------------------------------------------------------
+# run() dispatch — the @entrypoint markers ARE the table (recordstream run_entrypoint)
+# ---------------------------------------------------------------------------
+
+
+def test_entrypoint_markers_cover_every_task_literal_value() -> None:
+    """`run()` dispatches through the markers, so a task the Literal offers must be declared."""
+    declared = {str(meta["task"]) for meta in runnable_entrypoints(LightningSegmenter).values()}
+    assert declared == set(get_args(SegmenterTask))
+
+
+@pytest.mark.parametrize("task", get_args(SegmenterTask))
+def test_run_dispatches_to_the_entry_point_declaring_the_task(task: str) -> None:
+    calls: List[str] = []
+    trainer = LightningSegmenter(model=cast(Any, None), task=cast(Any, task))
+    trainer.initialize = lambda: None  # type: ignore[method-assign]
+    for name in get_args(SegmenterTask):  # instance attrs win over the class's bound methods
+        setattr(trainer, name, lambda n=name: calls.append(n))
+    trainer.run()
+    assert calls == [task]
