@@ -40,6 +40,7 @@ from marainer.lightning import (
     scalar_metrics,
 )
 from marainer.run_names import generate_run_name
+from marainer.sinks import PredictionsSink
 from marainer.torch import RecordSource, ensure_record_dataset
 from marainer.tracking.base import Tracker
 from pytorch_lightning.loggers import Logger
@@ -141,14 +142,14 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
             self.train_metrics = base.clone(prefix="train/")
             self.val_metrics = base.clone(prefix="val/")
             self.test_metrics = base.clone(prefix="test/")
-        self.predictions_sink: Any = None
+        self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
         self.trackers: Optional[List[Tracker]] = None
         self.log_system_metrics: bool = True
         self._trackers: List[Tracker] = []
 
     @property
-    def __torch_runner__(self) -> bool:  # type: ignore[override]  # dynamic per-task override of the marker
+    def __needs_autograd__(self) -> bool:  # type: ignore[override]  # dynamic per-task override of the marker
         """Only ``fit`` needs autograd; evaluate / test / predict are inference-only."""
         return self.task == "fit"
 
