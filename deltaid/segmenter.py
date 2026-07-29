@@ -318,7 +318,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         )
         for i in range(len(items)):
             m = per_record_meta[i] if per_record_meta and i < len(per_record_meta) else {}
-            self.predictions_sink.write(items[i], m)
+            cast(PredictionsSink, self.predictions_sink).write(items[i], m)
 
     def _finalize_metrics(self, metrics: Any) -> None:
         if not isinstance(metrics, MetricCollection) or self.metrics_sidecar_path is None:
