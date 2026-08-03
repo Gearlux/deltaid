@@ -48,12 +48,12 @@ import optax
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from flax import nnx
 from loggair import get_logger
-from marainer.artifacts import write_metrics_sidecar
-from marainer.metric_slots import merge_metric_specs
-from marainer.run_names import generate_run_name, run_prefix
-from marainer.tracking.base import Tracker, as_tracker_list
-from marainer.tracking.provenance import capture_log_file, log_run_context
-from marainer.tracking.render import per_class_vectors, render_vector_as_figure, render_vector_as_table
+from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_slots import merge_metric_specs
+from matrainer.run_names import generate_run_name, run_prefix
+from matrainer.tracking.base import Tracker, as_tracker_list
+from matrainer.tracking.provenance import capture_log_file, log_run_context
+from matrainer.tracking.render import per_class_vectors, render_vector_as_figure, render_vector_as_table
 from recordstream import (
     PredictionsSink,
     RecordSource,
@@ -178,7 +178,7 @@ class JaxSegmenter(ProgressReporting):
         task: Which entry point ``run()`` dispatches to.
         max_epochs: Training epochs.
         batch_size: Rows per batch.
-        trackers: marainer trackers — one or a list. This run's ONLY output wiring.
+        trackers: matrainer trackers — one or a list. This run's ONLY output wiring.
         callbacks: Callables invoked as ``callback(epoch, logs)`` after each epoch — JAX ships no
             callback protocol, so this is the plainest thing that works.
         experiment_name / run_name: tracking identity.
@@ -416,7 +416,7 @@ class JaxSegmenter(ProgressReporting):
         """The metric list for one eval split — its own slot merged over the shared ``metrics``.
 
         The combination rule is the workspace-wide one
-        (:func:`~marainer.metric_slots.merge_metric_specs`), so a config moving between backends
+        (:func:`~matrainer.metric_slots.merge_metric_specs`), so a config moving between backends
         keeps its shape. Only ``val`` and ``test`` have a slot: this loop computes metrics on the
         eval pass only.
         """
@@ -462,7 +462,7 @@ class JaxSegmenter(ProgressReporting):
         The same split every other backend makes, and for the same reason: ``log_metrics`` is a
         ``{name: float}`` channel, so a ``[C]`` per-class IoU has to go out through ``log_text``
         (and ``log_figure`` when ``plot_metrics`` asks) or be dropped. Which values are vectors is
-        marainer's rule, by SHAPE — see :func:`~marainer.tracking.render.per_class_vectors`.
+        matrainer's rule, by SHAPE — see :func:`~matrainer.tracking.render.per_class_vectors`.
         """
         named = {f"{prefix}{k}": v for k, v in logs.items()}
         scalars = {k: float(v) for k, v in named.items() if np.asarray(v).ndim == 0}
@@ -487,8 +487,8 @@ class JaxSegmenter(ProgressReporting):
         logger.info(f"deltaid jax training: {self.experiment_name} ({self.run_name})")
         if self.train_set is None:
             raise ValueError("JaxSegmenter.fit() requires a 'train_set'.")
-        # Provenance through marainer's plain FUNCTIONS — `runnable=self` so the hyperparameters
-        # and the resolved config come from marainer's ONE derivation rather than a dict this
+        # Provenance through matrainer's plain FUNCTIONS — `runnable=self` so the hyperparameters
+        # and the resolved config come from matrainer's ONE derivation rather than a dict this
         # backend transcribes for itself.
         trackers = self._live_trackers()
         manifest = log_run_context(trackers, runnable=self)
@@ -525,7 +525,7 @@ class JaxSegmenter(ProgressReporting):
         logger.info("Training complete.")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
         # Uploads the log file AND stamps the manifest's terminal status. Not optional once a
-        # manifest exists: left unfinished it stays `running`, and marainer's atexit hook then
+        # manifest exists: left unfinished it stays `running`, and matrainer's atexit hook then
         # calls a successful run `interrupted`.
         capture_log_file(trackers, manifest=manifest, status="success")
 

@@ -3,8 +3,8 @@
 A self-contained ``pytorch_lightning.LightningModule`` — its own ``training_step`` /
 ``validation_step`` / ``test_step`` / ``predict_step`` / ``configure_optimizers``, and a ``run()``
 that builds the loaders + ``pl.Trainer`` and calls ``fit`` / ``validate`` / ``test`` / ``predict``
-per the ``task`` knob. It reads like a textbook Lightning example; marainer is used ONLY for
-optional experiment tracking and a couple of small utilities. Remove marainer and this class still
+per the ``task`` knob. It reads like a textbook Lightning example; matrainer is used ONLY for
+optional experiment tracking and a couple of small utilities. Remove matrainer and this class still
 trains — you lose the rich tracking, not the training.
 
 Segmentation specifics it owns: deriving ``num_classes`` (from a concrete model head, an explicit
@@ -31,8 +31,8 @@ import torch
 import torch.nn as nn
 from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
 from loggair import get_logger
-from marainer.artifacts import write_metrics_sidecar
-from marainer.lightning import (
+from matrainer.artifacts import write_metrics_sidecar
+from matrainer.lightning import (
     TrackerLogger,
     TrackingCallback,
     activate_for_lightning,
@@ -40,10 +40,10 @@ from marainer.lightning import (
     build_metric_collection,
     scalar_metrics,
 )
-from marainer.metric_slots import merge_metric_specs
-from marainer.run_names import generate_run_name, run_prefix
-from marainer.tracking.base import Tracker, as_tracker_list
-from marainer.tracking.render import per_class_vectors, render_vector_as_figure, render_vector_as_table
+from matrainer.metric_slots import merge_metric_specs
+from matrainer.run_names import generate_run_name, run_prefix
+from matrainer.tracking.base import Tracker, as_tracker_list
+from matrainer.tracking.render import per_class_vectors, render_vector_as_figure, render_vector_as_table
 from recordstream import (
     PredictionsSink,
     RecordSource,
@@ -109,7 +109,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
             is excluded, since a class-id mask never contains it.
         task: Entry point :meth:`run` dispatches to — ``"fit"`` / ``"evaluate"`` / ``"test"`` / ``"predict"``.
         max_epochs / batch_size / num_workers: ergonomic flat-config knobs.
-        trackers: marainer trackers — one or a list. They ARE this run's metric sinks: each is
+        trackers: matrainer trackers — one or a list. They ARE this run's metric sinks: each is
             adapted to Lightning's logger interface, so there is no separate ``logger:`` slot of
             ``pytorch_lightning.loggers``.
         experiment_name / run_name: tracking identity.
@@ -127,7 +127,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
             classification there is no label map to derive them from: a mask carries ids, not
             names.
         plot_metrics: ALSO send each per-class metric to the trackers as a matplotlib bar chart,
-            not only as a table. Off by default: it makes matplotlib (``marainer[plot]``) a cost
+            not only as a table. Off by default: it makes matplotlib (``matrainer[plot]``) a cost
             of every eval epoch, where the table costs nothing.
 
     Post-construction slots (YAML / broadcasting): ``val_set``, ``optimizer``,
@@ -335,8 +335,8 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
     def _report_per_class(self, values: Any) -> None:
         """Send every per-class VECTOR to the log and to each tracker's text (and figure) channel.
 
-        Which computed values ARE per-class vectors is marainer's rule
-        (:func:`~marainer.tracking.render.per_class_vectors` — a flat numeric sequence of length
+        Which computed values ARE per-class vectors is matrainer's rule
+        (:func:`~matrainer.tracking.render.per_class_vectors` — a flat numeric sequence of length
         >= 2, by SHAPE not by metric name), and so are the renderers; this method only decides
         WHEN and WHERE.
 
@@ -431,7 +431,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         return cast(List[Tracker], self.trackers)
 
     def _build_trainer(self) -> L.Trainer:
-        """Flow the ``pl.Trainer`` and attach the OPTIONAL marainer tracking (a few lines; removable).
+        """Flow the ``pl.Trainer`` and attach the OPTIONAL matrainer tracking (a few lines; removable).
 
         The trackers ARE the Trainer's loggers: each is flowed (it may still be a deferred
         ``Fluid``) and adapted through ``TrackerLogger``, so Lightning's per-step metrics land in
@@ -444,7 +444,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         # every knob it set and only gains the loggers.
         trainer = cast(L.Trainer, flow(self.lightning, logger=adapters or False))
         if trackers:
-            # `runnable=self` rather than a params dict: marainer derives the hyperparameters from
+            # `runnable=self` rather than a params dict: matrainer derives the hyperparameters from
             # the flowed object graph AND dumps the resolved config, so no two backends can answer
             # "what were the hyperparameters?" differently.
             cb = TrackingCallback(trackers, runnable=self)
@@ -566,7 +566,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
     def _build_split_metrics(self, spec: Any, prefix: str) -> MetricCollection:
         """One split's live, prefixed collection — its own spec merged over the shared one.
 
-        The combination rule is :func:`marainer.metric_slots.merge_metric_specs`, shared with every
+        The combination rule is :func:`matrainer.metric_slots.merge_metric_specs`, shared with every
         other backend and with the classification task, so a config moving between them cannot
         change shape; what is torch's alone is the rest of this line — sizing the templates with
         ``num_classes`` and prefixing the collection.
@@ -588,7 +588,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
             cast(PredictionsSink, self.predictions_sink).write(item, m)
 
     def _write_metrics_sidecar(self, metrics: Any) -> None:
-        """Hand the run's final scalars to marainer, which owns where run artifacts land."""
+        """Hand the run's final scalars to matrainer, which owns where run artifacts land."""
         if not isinstance(metrics, MetricCollection):
             return
         try:

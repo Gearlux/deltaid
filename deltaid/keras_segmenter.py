@@ -12,7 +12,7 @@ Almost none of it is duplicated:
   have been. All this backend adds is :meth:`_to_arrays`, the few lines that say what a
   segmentation batch looks like — handed in exactly as a ``collate_fn`` is handed to a
   ``DataLoader``.
-* **Run artifacts** come from marainer; **tracking** is ``keras_tracking_callback``.
+* **Run artifacts** come from matrainer; **tracking** is ``keras_tracking_callback``.
 
 So what is written here is a batch-shaping function, ``compile()`` + ``fit()``, and the dispatch.
 
@@ -46,10 +46,10 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Union
 import numpy as np
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
-from marainer.artifacts import write_metrics_sidecar
-from marainer.metric_slots import union_metric_specs
-from marainer.run_names import generate_run_name, run_prefix
-from marainer.tracking.base import Tracker, as_tracker_list
+from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_slots import union_metric_specs
+from matrainer.run_names import generate_run_name, run_prefix
+from matrainer.tracking.base import Tracker, as_tracker_list
 from recordstream import (
     PredictionsSink,
     RecordSource,
@@ -100,7 +100,7 @@ class KerasSegmenter(ProgressReporting):
         task: Which entry point ``run()`` dispatches to.
         max_epochs: Training epochs.
         batch_size: Rows per batch.
-        trackers: marainer trackers — one or a list. This run's ONLY output wiring.
+        trackers: matrainer trackers — one or a list. This run's ONLY output wiring.
         callbacks: ``keras.callbacks.Callback`` instances. A file-writing one gets its parent
             directory created, because Keras opens the path without doing so.
         experiment_name / run_name: tracking identity.
@@ -362,7 +362,7 @@ class KerasSegmenter(ProgressReporting):
         return x, np.asarray(batch_values(batch, self.target_key), dtype="int64")
 
     def _callbacks(self) -> List[Any]:
-        """Wired Keras callbacks plus OPTIONAL marainer tracking (a few lines; removable)."""
+        """Wired Keras callbacks plus OPTIONAL matrainer tracking (a few lines; removable)."""
         callbacks = [flow(cb) for cb in (self.callbacks or [])]
         for callback in callbacks:
             # Keras's file-writing callbacks open their path without creating its parent, so a
@@ -373,9 +373,9 @@ class KerasSegmenter(ProgressReporting):
                 Path(target).expanduser().parent.mkdir(parents=True, exist_ok=True)
         trackers = self._live_trackers()
         if trackers:
-            from marainer.keras import keras_tracking_callback
+            from matrainer.keras import keras_tracking_callback
 
-            # `runnable=self` rather than a params dict: marainer derives the hyperparameters
+            # `runnable=self` rather than a params dict: matrainer derives the hyperparameters
             # from the flowed object graph AND dumps the resolved config.
             callbacks.append(keras_tracking_callback(trackers, runnable=self))
         return callbacks

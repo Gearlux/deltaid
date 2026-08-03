@@ -427,7 +427,7 @@ mlx: !scope:framework=mlx
 # is reported through the trackers' TEXT channel instead: a table sorted
 # WORST-CLASS-FIRST, printed to the log and logged to every wired tracker. Set
 # `plot_metrics: true` on the runnable to also get a bar chart (needs
-# `marainer[plot]`). `class_names:` labels the rows — omit it and the classes are
+# `matrainer[plot]`). `class_names:` labels the rows — omit it and the classes are
 # numbered, which is readable but not informative.
 val_metrics:
   iou_per_class: !lazy:torchmetrics.classification.MulticlassJaccardIndex
@@ -443,6 +443,6 @@ class_names: [pet, background, boundary]
 # also receives the git provenance, the resolved config and the run manifest.
 #
 # trackers:
-#   - !class:marainer.MlflowTracker
+#   - !class:matrainer.MlflowTracker
 #     experiment_name: oxford_pets_segmentation
-#   - !class:marainer.TensorBoardTracker
+#   - !class:matrainer.TensorBoardTracker

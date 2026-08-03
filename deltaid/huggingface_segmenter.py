@@ -41,11 +41,11 @@ import torch
 import torch.nn.functional as F
 from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
 from loggair import get_logger
-from marainer.artifacts import write_metrics_sidecar
-from marainer.metric_slots import merge_metric_specs
-from marainer.run_names import generate_run_name, run_prefix
-from marainer.tracking.base import Tracker, as_tracker_list
-from marainer.tracking.provenance import capture_log_file, log_run_context
+from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_slots import merge_metric_specs
+from matrainer.run_names import generate_run_name, run_prefix
+from matrainer.tracking.base import Tracker, as_tracker_list
+from matrainer.tracking.provenance import capture_log_file, log_run_context
 from recordstream import (
     PredictionsSink,
     RecordSource,
@@ -96,7 +96,7 @@ class HuggingFaceSegmenter(TorchRunner, ProgressReporting):
             translated into ``TrainingArguments``.
         report_to: Trainer's own tracking integrations. ``"none"`` on purpose.
         output_dir: Where Trainer writes its state; defaults beside the sidecar.
-        trackers: marainer trackers — one or a list.
+        trackers: matrainer trackers — one or a list.
         callbacks: ``transformers.TrainerCallback`` instances.
         experiment_name / run_name: tracking identity.
         input_key / target_key: Record keys for the image and the per-pixel mask.
@@ -382,8 +382,8 @@ class HuggingFaceSegmenter(TorchRunner, ProgressReporting):
         logger.info(f"deltaid huggingface training: {self.experiment_name} ({self.run_name})")
         if self.train_set is None:
             raise ValueError("HuggingFaceSegmenter.fit() requires a 'train_set'.")
-        # Provenance through marainer's plain FUNCTIONS — `runnable=self` so the hyperparameters
-        # and the resolved config come from marainer's ONE derivation.
+        # Provenance through matrainer's plain FUNCTIONS — `runnable=self` so the hyperparameters
+        # and the resolved config come from matrainer's ONE derivation.
         trackers = self._live_trackers()
         manifest = log_run_context(trackers, runnable=self)
         trainer = self._build_trainer(train=self.train_set, evaluate=self.val_set)

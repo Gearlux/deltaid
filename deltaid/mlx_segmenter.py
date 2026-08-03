@@ -50,12 +50,12 @@ import mlx.optimizers as optim
 import numpy as np
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
-from marainer.artifacts import write_metrics_sidecar
-from marainer.metric_slots import merge_metric_specs
-from marainer.run_names import generate_run_name, run_prefix
-from marainer.tracking.base import Tracker, as_tracker_list
-from marainer.tracking.provenance import capture_log_file, log_run_context
-from marainer.tracking.render import per_class_vectors, render_vector_as_figure, render_vector_as_table
+from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_slots import merge_metric_specs
+from matrainer.run_names import generate_run_name, run_prefix
+from matrainer.tracking.base import Tracker, as_tracker_list
+from matrainer.tracking.provenance import capture_log_file, log_run_context
+from matrainer.tracking.render import per_class_vectors, render_vector_as_figure, render_vector_as_table
 from recordstream import (
     PredictionsSink,
     RecordSource,
@@ -163,7 +163,7 @@ class MlxSegmenter(ProgressReporting):
         task: Which entry point ``run()`` dispatches to.
         max_epochs: Training epochs.
         batch_size: Rows per batch.
-        trackers: marainer trackers — one or a list. This run's ONLY output wiring.
+        trackers: matrainer trackers — one or a list. This run's ONLY output wiring.
         callbacks: Callables invoked as ``callback(epoch, logs)`` after each epoch.
         experiment_name / run_name: tracking identity.
         input_key / target_key: Record keys for the image and the per-pixel mask.
@@ -368,7 +368,7 @@ class MlxSegmenter(ProgressReporting):
         """The metric list for one eval split — its own slot merged over the shared ``metrics``.
 
         The combination rule is the workspace-wide one
-        (:func:`~marainer.metric_slots.merge_metric_specs`), so a config moving between backends
+        (:func:`~matrainer.metric_slots.merge_metric_specs`), so a config moving between backends
         keeps its shape.
         """
         spec = merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics"))
@@ -414,7 +414,7 @@ class MlxSegmenter(ProgressReporting):
 
         The same split every other backend makes: ``log_metrics`` is a ``{name: float}`` channel,
         so a ``[C]`` per-class IoU goes out through ``log_text`` (and ``log_figure`` when
-        ``plot_metrics`` asks) rather than being dropped. Which values are vectors is marainer's
+        ``plot_metrics`` asks) rather than being dropped. Which values are vectors is matrainer's
         rule, by SHAPE.
         """
         named = {f"{prefix}{k}": v for k, v in logs.items()}
@@ -440,8 +440,8 @@ class MlxSegmenter(ProgressReporting):
         logger.info(f"deltaid mlx training: {self.experiment_name} ({self.run_name})")
         if self.train_set is None:
             raise ValueError("MlxSegmenter.fit() requires a 'train_set'.")
-        # Provenance through marainer's plain FUNCTIONS — `runnable=self` so the hyperparameters
-        # and the resolved config come from marainer's ONE derivation.
+        # Provenance through matrainer's plain FUNCTIONS — `runnable=self` so the hyperparameters
+        # and the resolved config come from matrainer's ONE derivation.
         trackers = self._live_trackers()
         manifest = log_run_context(trackers, runnable=self)
         network = self.model
@@ -484,7 +484,7 @@ class MlxSegmenter(ProgressReporting):
         logger.info("Training complete.")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
         # Uploads the log file AND stamps the manifest's terminal status. Not optional once a
-        # manifest exists: left unfinished it stays `running`, and marainer's atexit hook then
+        # manifest exists: left unfinished it stays `running`, and matrainer's atexit hook then
         # calls a successful run `interrupted`.
         capture_log_file(trackers, manifest=manifest, status="success")
 

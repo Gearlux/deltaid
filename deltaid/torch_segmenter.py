@@ -48,13 +48,13 @@ import torch
 import torch.nn as nn
 from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
 from loggair import get_logger
-from marainer.artifacts import write_metrics_sidecar
-from marainer.metric_slots import merge_metric_specs
-from marainer.run_names import generate_run_name, run_prefix
-from marainer.torch import Device, build_metric_collection, resolve_device, scalar_metrics
-from marainer.tracking.base import Tracker, as_tracker_list
-from marainer.tracking.provenance import capture_log_file
-from marainer.tracking.render import per_class_vectors, render_vector_as_figure, render_vector_as_table
+from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_slots import merge_metric_specs
+from matrainer.run_names import generate_run_name, run_prefix
+from matrainer.torch import Device, build_metric_collection, resolve_device, scalar_metrics
+from matrainer.tracking.base import Tracker, as_tracker_list
+from matrainer.tracking.provenance import capture_log_file
+from matrainer.tracking.render import per_class_vectors, render_vector_as_figure, render_vector_as_table
 from recordstream import (
     PredictionsSink,
     RecordSource,
@@ -85,7 +85,7 @@ SegmenterTask = Literal["fit", "evaluate", "test", "predict"]
 MetricsSpec = Optional[Union[Dict[str, Union[Metric, LazyClass[Metric]]], MetricCollection]]
 
 #: Re-exported so ``TorchSegmenter``'s ``device`` knob can be read from this module the way every
-#: other name in its signature can. It is marainer's: a ``Trainer`` picks an accelerator for you, a
+#: other name in its signature can. It is matrainer's: a ``Trainer`` picks an accelerator for you, a
 #: hand-written loop has to pick one itself, and every such loop picks identically — so the choice
 #: is a torch-platform helper, not this backend's private function.
 __all__ = ["Device", "MetricsSpec", "SegmenterTask", "TorchSegmenter"]
@@ -120,7 +120,7 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
         checkpoint_dir: Directory for ``model.pt`` (a plain ``state_dict``). ``None`` writes no
             weights, which is what a smoke run wants.
         grad_clip: Clip gradients to this global norm before each ``step()``. ``None`` disables.
-        trackers: marainer trackers — one or a list.
+        trackers: matrainer trackers — one or a list.
         class_names: Labels for the per-class metric report, in class-id order; indices otherwise.
         plot_metrics: ALSO send each per-class metric to the trackers as a matplotlib bar chart.
 
@@ -346,7 +346,7 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
     def _build_split_metrics(self, spec: Any, prefix: str) -> MetricCollection:
         """One split's live, prefixed collection — its own spec merged over the shared one.
 
-        The combination rule is :func:`~marainer.metric_slots.merge_metric_specs`, shared with
+        The combination rule is :func:`~matrainer.metric_slots.merge_metric_specs`, shared with
         every other backend so a config moving between them cannot change shape.
         """
         assert self.num_classes is not None
@@ -431,8 +431,8 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
     def _report_per_class(self, values: Any, step: Optional[int] = None) -> None:
         """Send every per-class VECTOR to the log and to each tracker's text (and figure) channel.
 
-        Which computed values ARE per-class vectors is marainer's rule
-        (:func:`~marainer.tracking.render.per_class_vectors` — a flat numeric sequence of length
+        Which computed values ARE per-class vectors is matrainer's rule
+        (:func:`~matrainer.tracking.render.per_class_vectors` — a flat numeric sequence of length
         >= 2, by SHAPE not by metric name), and so are the renderers; this decides only WHEN and
         WHERE. Identical to the Lightning backend's, minus the sanity-check guard: this loop has
         no sanity check to skip.
@@ -485,7 +485,7 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
         if loaders["test"] is not None:
             self._computed_metrics.update(self._score(cast(DataLoader[Any], loaders["test"])))
         # Uploads the log file, stamps the manifest's terminal status AND finalizes every tracker.
-        # Not optional once a manifest exists: left unfinished it stays `running`, and marainer's
+        # Not optional once a manifest exists: left unfinished it stays `running`, and matrainer's
         # atexit hook then calls a successful run `interrupted`.
         capture_log_file(trackers, manifest=manifest, status="success")
 
@@ -578,17 +578,17 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
         return cast(List[Tracker], self.trackers)
 
     def _log_run_context(self, trackers: List[Tracker]) -> Any:
-        """Provenance through marainer's plain FUNCTIONS — hookup style (1).
+        """Provenance through matrainer's plain FUNCTIONS — hookup style (1).
 
         There is no callback protocol to hang a ``TrackingCallback`` on, which is exactly the case
-        marainer's function-level API exists for. ``runnable=self`` rather than a hand-written
-        params dict: marainer derives the hyperparameters from the flowed object graph and dumps
+        matrainer's function-level API exists for. ``runnable=self`` rather than a hand-written
+        params dict: matrainer derives the hyperparameters from the flowed object graph and dumps
         the resolved config, so this backend and the Lightning one cannot answer "what were the
         hyperparameters?" differently. Returns the run manifest so ``fit()`` can finish it.
         """
         if not trackers:
             return None
-        from marainer.tracking.provenance import log_run_context
+        from matrainer.tracking.provenance import log_run_context
 
         return log_run_context(trackers, {"device": str(self._device)}, runnable=self)
 

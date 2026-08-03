@@ -249,7 +249,7 @@ val_metrics:
     average: null
 
 class_names: [pet, background, boundary]   # rows are numbered without this
-plot_metrics: true                         # ALSO a bar chart (needs `marainer[plot]`)
+plot_metrics: true                         # ALSO a bar chart (needs `matrainer[plot]`)
 ```
 
 ```
@@ -275,8 +275,8 @@ provenance, the resolved config, and the run manifest.
 
 ```yaml
 trackers:
-  - !class:marainer.MlflowTracker { experiment_name: oxford_pets_segmentation }
-  - !class:marainer.TensorBoardTracker
+  - !class:matrainer.MlflowTracker { experiment_name: oxford_pets_segmentation }
+  - !class:matrainer.TensorBoardTracker
 ```
 
 `metrics_sidecar_path:` additionally writes the run's final scalars to a JSON file.
@@ -416,4 +416,4 @@ already in the manifest's `params`.
 
 Reading the identity is free and never builds the model: the properties consult stored
 configuration only. Adding one to your own wrapper is a single `model_refs` property — see
-[marainer's `uri` module](https://github.com/Gearlux/marainer).
+[matrainer's `uri` module](https://github.com/Gearlux/matrainer).

@@ -187,13 +187,13 @@ class TestPerSplitMetrics:
         seg.initialize()
         assert all(name.startswith("val/") and not name.startswith("val/val/") for name in seg.val_metrics)
 
-    def test_the_shared_rule_comes_from_marainer(self) -> None:
+    def test_the_shared_rule_comes_from_matrainer(self) -> None:
         """One combination rule across every backend AND both tasks — never re-derived here."""
         import inspect
 
         import deltaid.lightning_segmenter as module
 
-        assert "from marainer.metric_slots import" in inspect.getsource(module)
+        assert "from matrainer.metric_slots import" in inspect.getsource(module)
 
 
 # --------------------------------------------------------------------------- #
@@ -217,7 +217,7 @@ class TestTrackers:
     def test_flowing_them_writes_back_so_a_fluid_is_not_rebuilt(self) -> None:
         """`flow()` on a live object is idempotent, but a `Fluid` would be REBUILT on every
         call — two MLflow runs for one training run."""
-        from marainer import CsvTracker
+        from matrainer import CsvTracker
 
         seg = _segmenter(trackers=LazyClass(CsvTracker))
         first = seg._live_trackers()
@@ -230,7 +230,7 @@ class TestTrackers:
         assert "logger" not in inspect.signature(LightningSegmenter.__init__).parameters
 
     def test_no_local_hyperparameter_derivation_survives(self) -> None:
-        """marainer owns the ONE derivation (`runnable=self`), so two backends cannot answer
+        """matrainer owns the ONE derivation (`runnable=self`), so two backends cannot answer
         "what were the hyperparameters?" differently."""
         import inspect
 
@@ -490,7 +490,7 @@ class TestThePerClassReport:
         assert "boundary" in tracker.texts[0][1]
 
     def test_no_figure_unless_plot_metrics_asks_for_one(self) -> None:
-        """matplotlib is the `marainer[plot]` extra and a figure is real work every eval epoch;
+        """matplotlib is the `matrainer[plot]` extra and a figure is real work every eval epoch;
         the table costs nothing, so it is the default and the chart is opt-in."""
         tracker = _RecordingTracker()
         seg = self._segmenter(trackers=[tracker])

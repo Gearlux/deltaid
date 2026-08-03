@@ -196,7 +196,7 @@ class TestTheSharedContract:
         assert _resolved(_segmenter(model=LazyClass(FlaxUNet), num_classes=None, train_set=_records())) == 3
 
     def test_it_uses_the_shared_combination_rule(self) -> None:
-        assert "from marainer.metric_slots import" in Path(inspect.getfile(JaxSegmenter)).read_text()
+        assert "from matrainer.metric_slots import" in Path(inspect.getfile(JaxSegmenter)).read_text()
 
     def test_a_split_slot_adds_to_the_shared_set_for_that_split_only(self) -> None:
         seg = _segmenter(metrics=["mean_iou"], val_metrics=["pixel_accuracy"])
@@ -266,7 +266,7 @@ class TestTheLoop:
         class _Tracker:
             """Records what it was handed. `log_dir` is not decoration: `log_run_context` reads
             the FIRST tracker's for where the manifest lands, so a fake without one fails inside
-            marainer rather than in anything this test is about."""
+            matrainer rather than in anything this test is about."""
 
             def __init__(self, log_dir: Path) -> None:
                 self.log_dir = str(log_dir)

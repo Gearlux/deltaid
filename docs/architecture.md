@@ -329,7 +329,7 @@ case the absence is stated rather than emulated:
   `CompileMetrics` container; and `Model.metrics` is a read-only property. So a metric wired to
   `val_metrics` is computed on training too. Widening is the honest failure — a metric appearing
   where it was not asked for is noise a reader ignores, where DROPPING it would be a wired metric
-  that silently reports nothing. `marainer.metric_slots` exists in two functions for exactly this
+  that silently reports nothing. `matrainer.metric_slots` exists in two functions for exactly this
   split: `merge_metric_specs` for an engine whose loop the caller owns, `union_metric_specs` for
   one that cannot be told to narrow.
 

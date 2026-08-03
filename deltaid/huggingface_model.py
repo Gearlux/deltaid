@@ -30,7 +30,7 @@ from typing import Any, List, Optional
 
 from confluid import configurable
 from loggair import get_logger
-from marainer.uri import ModelRef, hf_model_ref
+from matrainer.uri import ModelRef, hf_model_ref
 
 logger = get_logger(__name__)
 

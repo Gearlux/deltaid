@@ -86,9 +86,9 @@ class TestItNeedsNoTrainingFramework:
             for alias in node.names
         }
         assert "pytorch_lightning" not in imported
-        # `marainer.lightning` would pull it in transitively — that package's `__init__` runs
+        # `matrainer.lightning` would pull it in transitively — that package's `__init__` runs
         # `require("pytorch_lightning")`, which is exactly how this regression happened before.
-        assert "from marainer.lightning import" not in source
+        assert "from matrainer.lightning import" not in source
 
     def test_it_has_no_trainer_slot(self) -> None:
         """No `lightning:` slot and no framework loggers — tracking goes through `trackers:`,
@@ -150,7 +150,7 @@ class TestParityWithTheLightningBackend:
 
     def test_it_uses_the_shared_combination_rule(self) -> None:
         """One rule across every backend AND both tasks — never re-derived per backend."""
-        assert "from marainer.metric_slots import" in Path(inspect.getfile(TorchSegmenter)).read_text()
+        assert "from matrainer.metric_slots import" in Path(inspect.getfile(TorchSegmenter)).read_text()
 
     def test_the_target_is_read_back_as_int64(self) -> None:
         from recordstream import collate_records
@@ -193,7 +193,7 @@ class TestTheSharedContract:
         assert {"model", "train_set", "optimizer", "train_loader"} <= lazy_param_names(TorchSegmenter)
 
     def test_no_local_hyperparameter_derivation_survives(self) -> None:
-        """marainer owns the ONE derivation, so two backends cannot answer differently."""
+        """matrainer owns the ONE derivation, so two backends cannot answer differently."""
         source = Path(inspect.getfile(TorchSegmenter)).read_text()
         assert "_config_params" not in source
         assert "runnable=self" in source

@@ -20,7 +20,7 @@ The wrapper exists for the same three reasons its classification twin (``sonair.
    architecture, the encoder, its pretrained weights, and any decoder-specific keyword) for YAML
    wiring, with defaults that train out of the box.
 2. **Checkpoint loading** — ``checkpoint_path`` strips Lightning's ``model.`` prefix via
-   :func:`marainer.torch.load_lightning_checkpoint`, so a previously trained model resumes or
+   :func:`matrainer.torch.load_lightning_checkpoint`, so a previously trained model resumes or
    evaluates without the caller knowing about Lightning's wrapping.
 3. **Generic across the zoo** — ``encoder_name`` accepts any of smp's ~800 encoders (ResNet,
    EfficientNet, MiT/SegFormer, MobileNet, ConvNeXt, Swin …), so one wrapper covers the library.
@@ -43,8 +43,8 @@ import segmentation_models_pytorch as smp
 import torch.nn as nn
 from confluid import configurable
 from loggair import get_logger
-from marainer.torch import load_lightning_checkpoint
-from marainer.uri import ModelRef, file_model_ref
+from matrainer.torch import load_lightning_checkpoint
+from matrainer.uri import ModelRef, file_model_ref
 from torch import Tensor
 
 logger = get_logger(__name__)
@@ -145,7 +145,7 @@ class SegmentationModelPytorch(nn.Module):
 
     @property
     def model_refs(self) -> List[ModelRef]:
-        """The weight artifacts this model loads — see :mod:`marainer.uri`.
+        """The weight artifacts this model loads — see :mod:`matrainer.uri`.
 
         smp routes an encoder's pretrained weights through whichever upstream registry owns it
         (timm, torchvision, the library's own release assets), and which one that is depends on
