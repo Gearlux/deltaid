@@ -11,13 +11,17 @@ This derives the expectation from the SOURCE rather than restating a list, so a 
 added tomorrow is covered without editing this file.
 """
 
+import ast
 import inspect
 import re
+from pathlib import Path
 from typing import Set
 
 from confluid import lazy_param_names
 
-from deltaid.segmenter import LightningSegmenter
+from deltaid.lightning_segmenter import LightningSegmenter
+
+SOURCE_DIR = Path(__file__).resolve().parent.parent / "deltaid"
 
 
 def _slots_flowed_at_runtime() -> Set[str]:
@@ -47,3 +51,60 @@ def test_the_lazy_scan_sees_this_class_at_all() -> None:
     Without this, the assertion above would pass vacuously wherever the scan is blind.
     """
     assert lazy_param_names(LightningSegmenter), "no lazy slots detected — the body scan may be blind here"
+
+
+def test_no_segmenter_declares_its_model_slot_as_lazy_any() -> None:
+    """``Lazy[Any]`` is HALF a declaration — it defers, and says nothing about what fits.
+
+    A reader cannot tell what the slot admits, mypy checks nothing through it, and
+    ``to_pydantic`` hands navigaitor / StreamStudio an open field. Read from the SOURCE with
+    ``ast`` rather than by importing, because a backend added later may need a framework this
+    machine does not have — which is exactly where a copy-pasted slot lands.
+    """
+    offenders = []
+    for path in sorted(SOURCE_DIR.glob("*_segmenter.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.FunctionDef) and node.name == "__init__"):
+                continue
+            for arg in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+                if arg.arg != "model" or arg.annotation is None:
+                    continue
+                text = ast.unparse(arg.annotation)
+                if "Lazy[Any]" in text:
+                    offenders.append(f"{path.name}: model: {text}")
+    assert not offenders, f"name the type the loop requires, not Any: {offenders}"
+
+
+def _declared_lazy_slots(source: str) -> Set[str]:
+    """Slot names a module annotates ``Lazy[...]`` — as a ctor param OR an ``__init__`` body attr."""
+    params = set(re.findall(r"\b([a-z_]+): (?:Mandatory\[)?(?:Optional\[)?Lazy\[", source))
+    body = set(re.findall(r"self\.([a-z_]+): (?:Optional\[)?Lazy\[", source))
+    return params | body
+
+
+def test_every_backend_declares_the_slots_it_flows() -> None:
+    """The same rule as above, applied to EVERY backend by reading their SOURCE.
+
+    ``lazy_param_names`` needs the class IMPORTED, and a backend may need a framework a default
+    install lacks — so an import-based sweep would skip exactly where a copy-pasted slot lands.
+    A regex over the module text covers every backend on every machine.
+    """
+    offenders = {}
+    checked = 0
+    for path in sorted(SOURCE_DIR.glob("*_segmenter.py")):
+        source = path.read_text()
+        flowed = set(re.findall(r"flow\(\s*self\.([a-z_]+)", source))
+        assert flowed, f"{path.name}: found no flow(self.<slot>) calls — has the dispatch changed?"
+
+        undeclared = sorted(flowed - _declared_lazy_slots(source))
+        if undeclared:
+            offenders[path.name] = undeclared
+        checked += 1
+
+    assert checked >= 3, f"expected every backend to be scanned, saw {checked}"
+    assert not offenders, (
+        f"{offenders} are flowed at run time but not annotated Lazy[T]. "
+        "An auto-flow walker would build them eagerly — for a slot needing a runtime kwarg "
+        "(or a positional runtime arg) that raises; for the rest it silently discards the deferral."
+    )
