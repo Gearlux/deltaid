@@ -24,7 +24,13 @@ SOURCE_DIR = Path(__file__).resolve().parent.parent / "deltaid"
 #: finishes on end), while the plain functions leave that to the caller — so a backend using the
 #: functions MUST also finish the manifest itself.
 CALLBACK_BACKENDS: Set[str] = {"lightning_segmenter", "keras_segmenter", "tensorflow_segmenter"}
-FUNCTION_BACKENDS: Set[str] = {"torch_segmenter", "fastai_segmenter", "huggingface_segmenter"}
+FUNCTION_BACKENDS: Set[str] = {
+    "torch_segmenter",
+    "fastai_segmenter",
+    "huggingface_segmenter",
+    "jax_segmenter",
+    "mlx_segmenter",
+}
 
 #: The callback spellings, one per framework family. Kept as a SET rather than one name because
 #: the adapters are genuinely different objects — `marainer.lightning.TrackingCallback` is a

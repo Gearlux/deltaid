@@ -31,6 +31,8 @@ _BACKEND_NAMES = {
     "KerasSegmenter": ("deltaid.keras_segmenter", "keras"),
     "TensorFlowSegmenter": ("deltaid.tensorflow_segmenter", "tensorflow"),
     "HuggingFaceSegmenter": ("deltaid.huggingface_segmenter", "huggingface"),
+    "JaxSegmenter": ("deltaid.jax_segmenter", "jax"),
+    "MlxSegmenter": ("deltaid.mlx_segmenter", "mlx"),
     "SegmentationModelPytorch": ("deltaid.smp_model", "torch"),
     "HuggingFaceSegmentationModel": ("deltaid.huggingface_model", "huggingface"),
     # The shared spec's implementations. `TorchUNet` serves EVERY torch backend (lightning, torch,
@@ -40,6 +42,8 @@ _BACKEND_NAMES = {
     "TorchUNet": ("deltaid.unet.torch_unet", "torch"),
     "KerasUNet": ("deltaid.unet.keras_unet", "keras"),
     "TensorFlowUNet": ("deltaid.unet.tensorflow_unet", "tensorflow"),
+    "FlaxUNet": ("deltaid.unet.flax_unet", "jax"),
+    "MlxUNet": ("deltaid.unet.mlx_unet", "mlx"),
 }
 
 __all__ = [*_BACKEND_NAMES]

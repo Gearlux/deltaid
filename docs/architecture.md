@@ -208,7 +208,7 @@ on the CLI, the config layout, or the discovery tags.
 
 ---
 
-## 6. One shared U-Net, apart from the zoo wrapper (2026-08-02)
+## 6. One shared U-Net, apart from the zoo wrapper (2026-08-02, five implementations as of 2026-08-03)
 
 **Context.** Record 1 made the model a knob over `segmentation_models_pytorch`, which covers
 twelve architectures over ~800 encoders. That is the right answer for real work and the wrong one
@@ -217,9 +217,10 @@ to reach for, and the obvious substitutes — a different library per framework 
 different *networks* while claiming to compare four *frameworks*.
 
 **Decision.** A second kind of model, in its own package: `deltaid/unet/spec.py` states ONE U-Net
-in prose and constants, and each framework implements it natively (`torch_unet.py` today). The
-spec **derives** `trainable_parameter_count` from the architecture, and every implementation is
-checked against that derivation.
+in prose and constants, and each framework implements it natively — five of them as of 2026-08-03
+(`torch_unet.py`, `keras_unet.py`, `tensorflow_unet.py`, `flax_unet.py`, `mlx_unet.py`). The spec
+**derives** `trainable_parameter_count` from the architecture, and every implementation is checked
+against that derivation.
 
 **Consequences.**
 
@@ -228,7 +229,16 @@ checked against that derivation.
   lives in `unet/`. Their knobs differ accordingly (`encoder_weights` vs `widths`).
 - The derived count is the only thing holding the implementations together — the layer *order* is
   prose, because different APIs cannot share code. So an implementation is checked against a
-  CLAIM, not against whichever one was written first.
+  CLAIM, not against whichever one was written first. All five report **488,739** for 3 classes,
+  including under custom `widths`.
+- **Excluding batch-norm's running statistics takes a different mechanism in every framework**, and
+  that is the one place the "same network" claim is fragile. torch holds them as BUFFERS (so
+  `requires_grad` filtering does it); Keras as non-trainable WEIGHTS (`trainable_weights`); raw
+  TensorFlow as `trainable=False` variables; Flax as `nnx.BatchStat`, a different variable *type*
+  in the same state tree (so counting `nnx.Param` only); and **MLX keeps them in the SAME parameter
+  tree as the weights**, so there the exclusion is a NAME filter. Without that last one the
+  five-way match silently breaks — which is exactly the kind of drift the derived count exists to
+  catch.
 - **Three spec choices exist for portability, not quality**, and each would otherwise make "the
   same network" untrue by construction:
   - upsampling is parameter-free NEAREST, because a learned `ConvTranspose2d`'s parameter count
@@ -246,9 +256,17 @@ checked against that derivation.
 
 ```python
 from deltaid.unet.spec import trainable_parameter_count
+from deltaid.unet.flax_unet import FlaxUNet
+from deltaid.unet.mlx_unet import MlxUNet
 from deltaid.unet.torch_unet import TorchUNet
 
-trainable_parameter_count(3) == TorchUNet(num_classes=3).parameter_count == 488_739
+assert (
+    trainable_parameter_count(3)
+    == TorchUNet(num_classes=3).parameter_count   # buffers excluded by `requires_grad`
+    == FlaxUNet(num_classes=3).parameter_count    # `nnx.Param` only — BatchStat is another type
+    == MlxUNet(num_classes=3).parameter_count     # running stats excluded BY NAME
+    == 488_739
+)
 ```
 
 **What you may change.** Add an implementation; the derivation tells you if it disagrees. Changing
@@ -257,11 +275,11 @@ or the comparison stops meaning anything.
 
 ---
 
-## 7. Six loops over one config — and what each backend does *not* have (2026-08-02, extended 2026-08-03)
+## 7. Eight loops over one config — and what each backend does *not* have (2026-08-02, completed 2026-08-03)
 
-**Context.** "Swap the runnable, keep the config" is easy to assert and hard to keep true. Six
-backends now run the same YAML, and the interesting question is not that they work but what each
-one had to give up.
+**Context.** "Swap the runnable, keep the config" is easy to assert and hard to keep true. All
+eight backends now run the same YAML, and the interesting question is not that they work but what
+each one had to give up.
 
 **Decision.** Implement the two torch backends that differ from Lightning in opposite directions —
 one with *less* framework (`torch`, a hand-written loop) and one with a *different* framework
@@ -322,6 +340,35 @@ case the absence is stated rather than emulated:
   `FRAMEWORKS["huggingface"].registrations is None` records it: a model that computes its own loss
   leaves nothing for a config to wire, so an empty registrations module would be a lie about the
   shape rather than an economy.
+
+The last two, added 2026-08-03, complete the set — and both give up the same thing, for the same
+reason:
+
+| | `jax` | `mlx` |
+|---|---|---|
+| the loop | `nnx.jit` + optax, traced once | written out by hand |
+| the model | `FlaxUNet` | `MlxUNet` |
+| loss / metrics / optimizer | **names**, not `!class:` tags | **names**, not `!class:` tags |
+| callbacks | a plain `(epoch, logs)` callable | a plain `(epoch, logs)` callable |
+| per-split metrics | val/test only | val/test only |
+| what it alone brings | the loop as a pure function | unified memory, no device transfer |
+
+- **Neither has a registrations module**, and unlike `huggingface` — where the reason is that the
+  model computes its own loss — the reason here is that **optax and `mlx.nn.losses` ship plain
+  FUNCTIONS**. There is no class for a `!class:` tag to resolve or for confluid's registry to tag,
+  so a loss is named (`"softmax_cross_entropy_with_integer_labels"`, `"cross_entropy"`). Three
+  backends therefore have `registrations=None` for two genuinely different reasons, which is why
+  the field is `Optional[str]` rather than a boolean.
+- **Neither has a callback CLASS to name**, because neither framework ships a callback protocol —
+  so `callbacks:` holds a plain callable invoked as `callback(epoch, logs)`. Spelling that
+  signature out in the type alias is what makes the slot checkable at all.
+- **`ignore_index` is applied in `_loss_fn`, not passed down**, because neither framework's loss
+  takes one. The per-pixel loss is masked and the mean is over the VALID pixels; dividing by the
+  full pixel count would shrink the loss in proportion to how much of the image is void — a
+  silent, image-dependent learning-rate change.
+- The one asymmetry between them is worth stating because it is easy to copy wrong: **optax ships
+  optimizer FACTORIES (`optax.adam(lr)`) while `mlx.optimizers` ships CLASSES**, so `_as_optimizer`
+  *calls* in one and *instantiates* in the other.
 
 Two upstream limits are worth knowing before they cost an afternoon, and both are *config*
 answers rather than code ones. `keras.metrics.MeanIoU` on the **torch** engine scatters once per

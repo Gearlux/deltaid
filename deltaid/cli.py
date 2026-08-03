@@ -100,6 +100,16 @@ FRAMEWORKS: Dict[str, Framework] = {
         # No registrations: an `AutoModelForSemanticSegmentation` computes its own loss from
         # `labels=`, so there is nothing a config could wire.
     ),
+    "jax": Framework(
+        "JAX — a jitted optax loop over a Flax model, the loop written out in full.",
+        # No registrations either, for a DIFFERENT reason than huggingface's: optax ships plain
+        # FUNCTIONS, so a loss is resolved by NAME and there is no class for the registry to tag.
+    ),
+    "mlx": Framework(
+        "MLX — Apple silicon, unified memory, lazy arrays (`mlx.nn` losses by NAME).",
+        # `mlx.nn.losses` are functions like optax's; `mlx.optimizers` ships classes, but a
+        # config names those too. Nothing to register.
+    ),
 }
 
 #: Verb -> the ``task`` it forces. The verb wins over any ``task:`` in the YAML.

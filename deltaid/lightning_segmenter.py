@@ -43,6 +43,7 @@ from marainer.lightning import (
 from marainer.metric_slots import merge_metric_specs
 from marainer.run_names import generate_run_name, run_prefix
 from marainer.tracking.base import Tracker, as_tracker_list
+from marainer.tracking.render import per_class_vectors, render_vector_as_figure, render_vector_as_table
 from recordstream import (
     PredictionsSink,
     RecordSource,
@@ -120,6 +121,14 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
             ``metrics`` — how a metric is added to one split only (a per-class IoU on validation).
             Each slot holds the spec until :meth:`initialize` builds it, and the live prefixed
             ``MetricCollection`` after.
+        class_names: Labels for the per-class metric report, in class-id order. Omitted, the
+            classes are named by INDEX — which is readable but not informative, so a run that
+            wires a ``MulticlassJaccardIndex(average=None)`` usually wants these too. Unlike
+            classification there is no label map to derive them from: a mask carries ids, not
+            names.
+        plot_metrics: ALSO send each per-class metric to the trackers as a matplotlib bar chart,
+            not only as a table. Off by default: it makes matplotlib (``marainer[plot]``) a cost
+            of every eval epoch, where the table costs nothing.
 
     Post-construction slots (YAML / broadcasting): ``val_set``, ``optimizer``,
     ``train/val/test_loader``, ``lightning``, ``loss_fn``, ``predictions_sink``,
@@ -146,6 +155,8 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         train_metrics: MetricsSpec = None,
         val_metrics: MetricsSpec = None,
         test_metrics: MetricsSpec = None,
+        class_names: Optional[List[str]] = None,
+        plot_metrics: bool = False,
     ) -> None:
         super().__init__()
         self.model: Lazy[nn.Module] = model
@@ -204,6 +215,8 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         # at run time.
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
         self.log_system_metrics: bool = True
+        self.class_names: Optional[List[str]] = list(class_names) if class_names else None
+        self.plot_metrics = plot_metrics
 
     @property
     def __needs_autograd__(self) -> bool:  # type: ignore[override]  # dynamic per-task override of the marker
@@ -299,18 +312,55 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         self._report_epoch_metrics(self.test_metrics)
 
     def _report_epoch_metrics(self, collection: Any) -> None:
-        """Compute one split's metrics once at epoch end and log the scalars.
+        """Compute one split's metrics once at epoch end: scalars logged, per-class vectors reported.
 
         Computing here rather than handing the whole `MetricCollection` to `log_dict` is what
         lets a non-scalar metric be wired at all: `log_dict` reduces every value through
-        Lightning's `convert_tensors_to_scalars`, which raises on anything that is not one
+        Lightning's `convert_tensors_to_scalars`, which RAISES on anything that is not one
         number — and a per-class IoU (``average=None`` -> a ``[C]`` vector) is exactly the metric
-        a segmentation run wants on validation. `scalar_metrics` keeps the scalars; the rest is
-        dropped here rather than crashing the epoch (see `TASKS.md` for reporting it properly).
+        a segmentation run wants on validation.
+
+        So the scalars go to `log_dict` and the vectors go to `_report_per_class`, which is the
+        difference from the classification task: there the useful non-scalar is a square
+        confusion MATRIX and the renderers are heatmaps, here it is a per-class VECTOR and the
+        renderings are a worst-first table and a bar chart. Both selection rules read the same
+        computed mapping and each takes only its own shape.
         """
         if not isinstance(collection, MetricCollection):
             return
-        self.log_dict(scalar_metrics(collection.compute()))
+        values = collection.compute()
+        self.log_dict(scalar_metrics(values))
+        self._report_per_class(values)
+
+    def _report_per_class(self, values: Any) -> None:
+        """Send every per-class VECTOR to the log and to each tracker's text (and figure) channel.
+
+        Which computed values ARE per-class vectors is marainer's rule
+        (:func:`~marainer.tracking.render.per_class_vectors` — a flat numeric sequence of length
+        >= 2, by SHAPE not by metric name), and so are the renderers; this method only decides
+        WHEN and WHERE.
+
+        Skipped during Lightning's sanity check: two batches through an untrained model produce a
+        per-class table nobody wants to read, and it would be the FIRST one in the log.
+        """
+        if self._trainer is not None and self.trainer.sanity_checking:
+            return
+        step = self.current_epoch if self._trainer is not None else None
+        trackers = self._live_trackers()
+        for payload in per_class_vectors(values, self.class_names or None):
+            table = render_vector_as_table(payload["name"], payload["values"], payload["class_names"])
+            logger.info(table)
+            # Rendered ONCE per report, not once per tracker: a figure is real work, and every
+            # tracker can be handed the same one.
+            figure = (
+                render_vector_as_figure(payload["name"], payload["values"], payload["class_names"])
+                if self.plot_metrics and trackers
+                else None
+            )
+            for tracker in trackers:
+                tracker.log_text(payload["name"], table, step=step)
+                if figure is not None:
+                    tracker.log_figure(payload["name"], figure, step=step)
 
     def configure_optimizers(self) -> Any:
         return flow(self.optimizer, params=self.parameters())

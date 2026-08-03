@@ -7,7 +7,8 @@ framework arrives — and it is the only thing holding the implementations toget
 APIs cannot share the layer code.
 """
 
-from typing import Tuple
+from pathlib import Path
+from typing import Any, Tuple
 
 import pytest
 import torch
@@ -230,19 +231,118 @@ class TestTensorFlowUNetMatchesTheSpec:
         assert tuple(out.shape) == (2, 64, 64, 3)
 
 
-def test_all_three_implementations_agree_with_the_spec_and_each_other() -> None:
+class TestFlaxUNetMatchesTheSpec:
+    @pytest.mark.parametrize("num_classes", [2, 3, 10])
+    def test_the_parameter_count_matches_the_derivation(self, num_classes: int) -> None:
+        from deltaid.unet.flax_unet import FlaxUNet
+
+        assert FlaxUNet(num_classes=num_classes).parameter_count == trainable_parameter_count(num_classes)
+
+    @pytest.mark.parametrize("widths", [(8, 16), (16, 32, 64), (4, 8, 16, 32)])
+    def test_it_matches_under_a_changed_architecture_too(self, widths: Tuple[int, ...]) -> None:
+        from deltaid.unet.flax_unet import FlaxUNet
+
+        assert FlaxUNet(num_classes=3, widths=widths).parameter_count == trainable_parameter_count(3, widths=widths)
+
+    def test_batchnorm_statistics_are_excluded(self) -> None:
+        """nnx files them as `nnx.BatchStat`, a DIFFERENT variable type in the same state tree, so
+        counting `nnx.Param` only is what makes the exclusion — where torch got it from
+        `requires_grad` and MLX needs a name filter."""
+        import jax
+        from flax import nnx
+
+        from deltaid.unet.flax_unet import FlaxUNet
+
+        model = FlaxUNet(num_classes=3)
+        model.solidify()
+        stats = sum(int(v.size) for v in jax.tree_util.tree_leaves(nnx.state(model, nnx.BatchStat)))
+        assert stats > 0, "the network has BatchNorm, so this test is not vacuous"
+        assert model.parameter_count == trainable_parameter_count(3)
+
+    def test_it_emits_per_pixel_logits_at_the_input_resolution(self) -> None:
+        import numpy as np
+
+        from deltaid.unet.flax_unet import FlaxUNet
+
+        out = FlaxUNet(num_classes=3)(np.zeros((2, 64, 64, 3), dtype="float32"))
+        assert tuple(out.shape) == (2, 64, 64, 3)
+
+    def test_a_size_the_encoder_cannot_halve_is_refused_clearly(self) -> None:
+        import numpy as np
+
+        from deltaid.unet.flax_unet import FlaxUNet
+
+        with pytest.raises(ValueError, match="divisible by 8"):
+            FlaxUNet(num_classes=3)(np.zeros((1, 60, 60, 3), dtype="float32"))
+
+
+class TestMlxUNetMatchesTheSpec:
+    @pytest.mark.parametrize("num_classes", [2, 3, 10])
+    def test_the_parameter_count_matches_the_derivation(self, num_classes: int) -> None:
+        from deltaid.unet.mlx_unet import MlxUNet
+
+        assert MlxUNet(num_classes=num_classes).parameter_count == trainable_parameter_count(num_classes)
+
+    @pytest.mark.parametrize("widths", [(8, 16), (16, 32, 64), (4, 8, 16, 32)])
+    def test_it_matches_under_a_changed_architecture_too(self, widths: Tuple[int, ...]) -> None:
+        from deltaid.unet.mlx_unet import MlxUNet
+
+        assert MlxUNet(num_classes=3, widths=widths).parameter_count == trainable_parameter_count(3, widths=widths)
+
+    def test_batchnorm_statistics_are_excluded_BY_NAME(self) -> None:
+        """The one wrinkle MLX adds: it keeps the running mean and variance in the SAME parameter
+        tree as the weights, where the other four hold them as separate non-trainable state. So
+        the exclusion is a name filter, and without it the five-way match breaks."""
+        from mlx.utils import tree_flatten
+
+        from deltaid.unet.mlx_unet import MlxUNet
+
+        model = MlxUNet(num_classes=3)
+        model.solidify()
+        # `tree_flatten` is typed as returning a flat list, so the (path, value) pairs are
+        # indexed rather than unpacked — mypy rejects the star-unpack on its declared type.
+        leaves: Any = tree_flatten(model.parameters())
+        stats = [entry[0] for entry in leaves if str(entry[0]).endswith(("running_mean", "running_var"))]
+        assert stats, "the running statistics are in the parameter tree, so this test is not vacuous"
+        assert model.parameter_count == trainable_parameter_count(3)
+
+    def test_it_emits_per_pixel_logits_at_the_input_resolution(self) -> None:
+        import mlx.core as mx
+        import numpy as np
+
+        from deltaid.unet.mlx_unet import MlxUNet
+
+        out = MlxUNet(num_classes=3)(mx.array(np.zeros((2, 64, 64, 3), dtype="float32")))
+        mx.eval(out)
+        assert tuple(out.shape) == (2, 64, 64, 3)
+
+    def test_a_size_the_encoder_cannot_halve_is_refused_clearly(self) -> None:
+        import mlx.core as mx
+        import numpy as np
+
+        from deltaid.unet.mlx_unet import MlxUNet
+
+        with pytest.raises(ValueError, match="divisible by 8"):
+            MlxUNet(num_classes=3)(mx.array(np.zeros((1, 60, 60, 3), dtype="float32")))
+
+
+def test_all_five_implementations_agree_with_the_spec_and_each_other() -> None:
     """The claim the package exists to make, stated once.
 
     Not "they equal TorchUNet" — they equal the DERIVATION, which is what makes a cross-framework
-    benchmark compare frameworks rather than three different networks.
+    benchmark compare frameworks rather than five different networks.
     """
+    from deltaid.unet.flax_unet import FlaxUNet
     from deltaid.unet.keras_unet import KerasUNet
+    from deltaid.unet.mlx_unet import MlxUNet
     from deltaid.unet.tensorflow_unet import TensorFlowUNet
 
     counts = {
         "torch": _tiny().parameter_count,
         "keras": KerasUNet(num_classes=3).parameter_count,
         "tensorflow": TensorFlowUNet(num_classes=3).parameter_count,
+        "flax": FlaxUNet(num_classes=3).parameter_count,
+        "mlx": MlxUNet(num_classes=3).parameter_count,
     }
     assert set(counts.values()) == {trainable_parameter_count(3)}, counts
 
@@ -250,15 +350,21 @@ def test_all_three_implementations_agree_with_the_spec_and_each_other() -> None:
 def test_every_implementation_is_an_instance_of_its_own_frameworks_model_type() -> None:
     """No loop reaches THROUGH a wrapper: `model.fit(...)` must work on the object a config
     wired, so each implementation IS what its engine calls a model."""
+    import mlx.nn
     import tensorflow as tf
+    from flax import nnx
 
     from deltaid._keras import keras
+    from deltaid.unet.flax_unet import FlaxUNet
     from deltaid.unet.keras_unet import KerasUNet
+    from deltaid.unet.mlx_unet import MlxUNet
     from deltaid.unet.tensorflow_unet import TensorFlowUNet
 
     assert isinstance(_tiny(), torch.nn.Module)
     assert isinstance(KerasUNet(num_classes=3), keras.Model)
     assert isinstance(TensorFlowUNet(num_classes=3), tf.Module)
+    assert isinstance(FlaxUNet(num_classes=3), nnx.Module)
+    assert isinstance(MlxUNet(num_classes=3), mlx.nn.Module)
 
 
 # --------------------------------------------------------------------------- #
@@ -278,6 +384,51 @@ def test_the_unet_package_imports_nothing() -> None:
     source = pathlib.Path(str(deltaid.unet.__file__)).read_text()
     imports = [n for n in ast.walk(ast.parse(source)) if isinstance(n, (ast.Import, ast.ImportFrom))]
     assert imports == [], f"deltaid/unet/__init__.py must import nothing, found: {len(imports)}"
+
+
+def test_no_tensorflow_module_reaches_back_into_keras_through_a_tf_alias() -> None:
+    """`tf.initializers` / `tf.losses` / `tf.metrics` / `tf.keras` are ALL Keras since TF 2.16.
+
+    `tf.initializers.GlorotUniform` *is* `keras.initializers.GlorotUniform` — the same object, not
+    a wrapper — so in a process where Keras is bound to the TORCH engine (this workspace's
+    default, since `recordstream.keras` picks the first engine installed) it returns a **torch
+    tensor**, and `tf.Variable` then dies converting an MPS tensor to numpy.
+
+    Scanned as SOURCE across the whole package rather than asserted about one module, because the
+    mistake is a natural one to make in the next raw-TensorFlow module too — and it is invisible
+    in a single-file run: `TensorFlowUNet` passed alone and failed the moment a Keras test had run
+    first, which is exactly how this was found.
+    """
+    import re
+
+    root = Path(__file__).resolve().parents[1] / "deltaid"
+    aliases = ("tf.initializers", "tf.losses", "tf.metrics", "tf.optimizers", "tf.keras.")
+    offenders = {}
+    for path in sorted(root.rglob("*.py")):
+        code = "\n".join(line for line in path.read_text().splitlines() if not line.lstrip().startswith("#"))
+        code = re.sub(r'"""(?:.|\n)*?"""', "", code)  # the aliases are NAMED in the explanations
+        hits = [alias for alias in aliases if alias in code]
+        if hits:
+            offenders[path.relative_to(root).as_posix()] = hits
+    assert not offenders, (
+        f"these reach Keras through a `tf.` alias: {offenders}. Since TF 2.16 `tf.keras` IS "
+        "Keras 3, so on a torch-bound engine they return torch tensors. Write the primitive out "
+        "(see `_glorot_uniform`) or reach for `keras` explicitly and mean it."
+    )
+
+
+def test_the_tensorflow_unet_builds_after_keras_has_claimed_the_torch_engine() -> None:
+    """The regression itself, reproduced in ONE process — the only place it is visible.
+
+    `KerasUNet` first (which binds keras to whichever engine this session picked), then
+    `TensorFlowUNet`. With `tf.initializers` in the build this raises *"can't convert mps:0 device
+    type tensor to numpy"* out of `tf.Variable`; with `_glorot_uniform` it does not.
+    """
+    from deltaid.unet.keras_unet import KerasUNet
+    from deltaid.unet.tensorflow_unet import TensorFlowUNet
+
+    KerasUNet(num_classes=3).solidify()
+    assert TensorFlowUNet(num_classes=3).parameter_count == trainable_parameter_count(3)
 
 
 def test_the_spec_module_imports_only_the_standard_library() -> None:
