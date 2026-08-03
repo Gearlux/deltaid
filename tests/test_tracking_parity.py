@@ -19,7 +19,7 @@ import pytest
 
 SOURCE_DIR = Path(__file__).resolve().parent.parent / "deltaid"
 
-#: Which backend hands its trackers to which marainer entry point. The two are not
+#: Which backend hands its trackers to which matrainer entry point. The two are not
 #: interchangeable: a tracking CALLBACK owns the run lifecycle (it captures on fit start and
 #: finishes on end), while the plain functions leave that to the caller — so a backend using the
 #: functions MUST also finish the manifest itself.
@@ -33,8 +33,8 @@ FUNCTION_BACKENDS: Set[str] = {
 }
 
 #: The callback spellings, one per framework family. Kept as a SET rather than one name because
-#: the adapters are genuinely different objects — `marainer.lightning.TrackingCallback` is a
-#: `pl.Callback`, `marainer.keras.keras_tracking_callback` builds a `keras.callbacks.Callback` —
+#: the adapters are genuinely different objects — `matrainer.lightning.TrackingCallback` is a
+#: `pl.Callback`, `matrainer.keras.keras_tracking_callback` builds a `keras.callbacks.Callback` —
 #: and a backend must reach exactly one of them.
 TRACKING_CALLBACKS = ("TrackingCallback", "keras_tracking_callback")
 
@@ -52,10 +52,10 @@ def test_the_checked_list_is_every_backend_on_disk() -> None:
 
 
 @pytest.mark.parametrize("stem", sorted(CALLBACK_BACKENDS | FUNCTION_BACKENDS))
-def test_every_backend_hands_marainer_the_RUNNABLE(stem: str) -> None:
+def test_every_backend_hands_matrainer_the_RUNNABLE(stem: str) -> None:
     """`runnable=self`, never a hand-built params dict.
 
-    marainer owns the ONE hyperparameter derivation (it walks the flowed object graph and dumps
+    matrainer owns the ONE hyperparameter derivation (it walks the flowed object graph and dumps
     the resolved config), so two backends transcribing their own would give two answers to "what
     were the hyperparameters?" for the same config.
     """
@@ -73,7 +73,7 @@ def test_no_backend_keeps_a_private_hyperparameter_derivation(stem: str) -> None
 def test_a_function_driven_backend_finishes_its_manifest(stem: str) -> None:
     """`capture_log_file(trackers, manifest=…, status="success")` at the end of `fit()`.
 
-    Not optional once a manifest exists: left unfinished it stays `running`, and marainer's
+    Not optional once a manifest exists: left unfinished it stays `running`, and matrainer's
     atexit hook then labels a SUCCESSFUL run `interrupted`.
     """
     source = _backends()[stem]

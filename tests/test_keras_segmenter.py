@@ -230,7 +230,7 @@ class TestParityWithTheReferenceBackend:
 
     def test_it_uses_the_shared_combination_rule(self) -> None:
         """One rule across every backend AND both tasks — never re-derived per backend."""
-        assert "from marainer.metric_slots import" in Path(inspect.getfile(KerasSegmenter)).read_text()
+        assert "from matrainer.metric_slots import" in Path(inspect.getfile(KerasSegmenter)).read_text()
 
     def test_the_entrypoint_markers_are_the_dispatch_table(self) -> None:
         from recordstream.runnable import runnable_entrypoints

@@ -74,7 +74,7 @@ def test_keras_is_reached_through_the_module_that_pins_the_engine() -> None:
     """
     source = SOURCE.read_text()
     assert "from deltaid._tensorflow import" in source
-    # AST rather than a substring scan: `from marainer.keras import keras_tracking_callback` is
+    # AST rather than a substring scan: `from matrainer.keras import keras_tracking_callback` is
     # legitimate and CONTAINS "import keras", so a text check would fail on correct code.
     roots = {(node.module or "") for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ImportFrom)}
     roots |= {a.name for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Import) for a in node.names}

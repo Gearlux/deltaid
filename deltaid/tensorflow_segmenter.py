@@ -35,10 +35,10 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple, Union, c
 import numpy as np
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
-from marainer.artifacts import write_metrics_sidecar
-from marainer.metric_slots import merge_metric_specs
-from marainer.run_names import generate_run_name, run_prefix
-from marainer.tracking.base import Tracker, as_tracker_list
+from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_slots import merge_metric_specs
+from matrainer.run_names import generate_run_name, run_prefix
+from matrainer.tracking.base import Tracker, as_tracker_list
 from recordstream import (
     PredictionsSink,
     RecordSource,
@@ -92,7 +92,7 @@ class TensorFlowSegmenter(ProgressReporting):
             makes a traceback harder to read, which is the wrong trade for a smoke run.
         prefetch: Overlap input preparation with the step (``tf.data.AUTOTUNE``).
         export_dir: Where to write the SavedModel after a fit. ``None`` writes none.
-        trackers: marainer trackers — one or a list. This run's ONLY output wiring.
+        trackers: matrainer trackers — one or a list. This run's ONLY output wiring.
         callbacks: ``keras.callbacks.Callback`` instances, driven by hand through a ``CallbackList``.
         experiment_name / run_name: tracking identity.
         input_key / target_key: Record keys for the image and the per-pixel mask.
@@ -287,7 +287,7 @@ class TensorFlowSegmenter(ProgressReporting):
     def _split_metrics(self, split: str) -> List[Any]:
         """One split's live metric objects — its own spec merged over the shared one.
 
-        The combination rule is :func:`~marainer.metric_slots.merge_metric_specs`, shared with
+        The combination rule is :func:`~matrainer.metric_slots.merge_metric_specs`, shared with
         every other backend. Unlike the Keras backend this loop CAN honour a per-split set,
         because each traced step closes over its own list.
         """
@@ -405,7 +405,7 @@ class TensorFlowSegmenter(ProgressReporting):
 
     # ---- callbacks + tracking ------------------------------------------------ #
     def _callbacks(self) -> List[Any]:
-        """Wired Keras callbacks plus OPTIONAL marainer tracking (a few lines; removable)."""
+        """Wired Keras callbacks plus OPTIONAL matrainer tracking (a few lines; removable)."""
         callbacks = [flow(cb) for cb in (self.callbacks or [])]
         for callback in callbacks:
             target = getattr(callback, "filename", None) or getattr(callback, "filepath", None)
@@ -413,7 +413,7 @@ class TensorFlowSegmenter(ProgressReporting):
                 Path(target).expanduser().parent.mkdir(parents=True, exist_ok=True)
         trackers = self._live_trackers()
         if trackers:
-            from marainer.keras import keras_tracking_callback
+            from matrainer.keras import keras_tracking_callback
 
             callbacks.append(keras_tracking_callback(trackers, runnable=self))
         return callbacks

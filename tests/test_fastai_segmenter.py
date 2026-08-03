@@ -192,7 +192,7 @@ class TestParity:
         assert {"metrics", "val_metrics", "test_metrics"} <= set(params)
 
     def test_it_uses_the_shared_combination_rule(self) -> None:
-        assert "from marainer.metric_slots import" in Path(inspect.getfile(FastaiSegmenter)).read_text()
+        assert "from matrainer.metric_slots import" in Path(inspect.getfile(FastaiSegmenter)).read_text()
 
     def test_the_loaders_are_the_lightning_backends_construction(self) -> None:
         """Same names, same deferral, same overridability — so ONE config idiom drives both. The

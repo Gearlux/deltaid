@@ -233,7 +233,7 @@ class TestTheSharedContract:
     def test_a_function_driven_backend_finishes_its_own_manifest(self) -> None:
         """No tracking CALLBACK here (`report_to` is transformers' own integration surface), so
         the run's terminal status is this class's to stamp — left unfinished the manifest stays
-        `running` and marainer's atexit hook labels a successful run `interrupted`."""
+        `running` and matrainer's atexit hook labels a successful run `interrupted`."""
         source = inspect.getsource(HuggingFaceSegmenter.fit)
         assert "log_run_context" in source
         assert "capture_log_file" in source

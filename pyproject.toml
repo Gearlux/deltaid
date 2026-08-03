@@ -13,9 +13,9 @@ dependencies = [
     "recordstream>=0.1.0",
     "liquifai>=0.1.0",
     "loggair>=0.1.0",
-    # marainer is the TRACKING library (and the metric-slot rule + artifact writers). Its own
+    # matrainer is the TRACKING library (and the metric-slot rule + artifact writers). Its own
     # core install is light — no torch — so it belongs here rather than in a backend extra.
-    "marainer>=0.1.0",
+    "matrainer>=0.1.0",
 ]
 requires-python = ">=3.12"
 
@@ -28,7 +28,7 @@ requires-python = ">=3.12"
 # declares `deltaid[torch]` rather than restating the list. That is not just economy — it is what
 # makes "the config does not change between backends" true of the INSTALL as well.
 torch = [
-    "marainer[torch]>=0.1.0",
+    "matrainer[torch]>=0.1.0",
     "recordstream[torch]>=0.1.0",
     "torch",
     "torchvision",
@@ -42,7 +42,7 @@ torch = [
 ]
 lightning = [
     "deltaid[torch]",
-    "marainer[lightning]>=0.1.0",
+    "matrainer[lightning]>=0.1.0",
     "pytorch-lightning",
 ]
 # TWO upper bounds, both upstream breaks and both removable when upstream fixes them — do NOT
@@ -69,9 +69,9 @@ keras = [
     # The PyDataset batching adapter (`recordstream.keras.RecordSequence`) + the KERAS_BACKEND
     # import ordering this backend depends on.
     "recordstream[keras]>=0.1.0",
-    # Tracking for a Keras run. marainer[keras], NOT marainer[tensorflow]: the callback needs
+    # Tracking for a Keras run. matrainer[keras], NOT matrainer[tensorflow]: the callback needs
     # the Keras API, not the TensorFlow engine.
-    "marainer[keras]>=0.1.0",
+    "matrainer[keras]>=0.1.0",
     # The image+mask preprocessing chain the example config drives — one joint albumentations
     # draw resizes both. Shared with the torch extra, restated because neither includes it.
     "albumentations>=2.0",
@@ -80,7 +80,7 @@ tensorflow = [
     "keras>=3.0",           # Keras 3 IS tf.keras in TF >= 2.16
     "tensorflow>=2.16",     # ...this extra's engine
     "recordstream[keras]>=0.1.0",
-    "marainer[keras]>=0.1.0",
+    "matrainer[keras]>=0.1.0",
     "albumentations>=2.0",
 ]
 # `transformers` runs its models on torch here, so this extra names torch's stack — but NOT
@@ -91,7 +91,7 @@ huggingface = [
     "accelerate>=0.30",     # what `Trainer` uses for device/distribution placement
     "torch",
     "recordstream[torch]>=0.1.0",
-    "marainer[torch]>=0.1.0",
+    "matrainer[torch]>=0.1.0",
     "albumentations>=2.0",
 ]
 # JAX and MLX bring NO zoo to wrap — `transformers` dropped Flax in v5, and `mlx-image` hard-pins
@@ -105,7 +105,7 @@ jax = [
     # The PyDataset batching adapter (`recordstream.keras.RecordSequence`), reused verbatim —
     # batching a record stream is not a JAX problem.
     "recordstream[keras]>=0.1.0",
-    "marainer>=0.1.0",
+    "matrainer>=0.1.0",
     "albumentations>=2.0",
 ]
 mlx = [
@@ -113,7 +113,7 @@ mlx = [
     # elsewhere, so the extra stays installable (and empty) on any machine.
     "mlx>=0.15; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "recordstream[keras]>=0.1.0",
-    "marainer>=0.1.0",
+    "matrainer>=0.1.0",
     "albumentations>=2.0",
 ]
 dev = [

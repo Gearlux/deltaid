@@ -1,8 +1,8 @@
-"""``SegmentationModelPytorch`` names the weight artifacts it loads (``marainer.uri``)."""
+"""``SegmentationModelPytorch`` names the weight artifacts it loads (``matrainer.uri``)."""
 
 from pathlib import Path
 
-from marainer.uri import model_refs
+from matrainer.uri import model_refs
 
 from deltaid import SegmentationModelPytorch
 

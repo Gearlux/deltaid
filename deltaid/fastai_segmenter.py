@@ -59,11 +59,11 @@ from fastai.data.core import DataLoaders
 from fastai.learner import Learner
 from fastai.losses import CrossEntropyLossFlat
 from loggair import get_logger
-from marainer.artifacts import write_metrics_sidecar
-from marainer.metric_slots import merge_metric_specs
-from marainer.run_names import generate_run_name, run_prefix
-from marainer.tracking.base import Tracker, as_tracker_list
-from marainer.tracking.provenance import capture_log_file, log_run_context
+from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_slots import merge_metric_specs
+from matrainer.run_names import generate_run_name, run_prefix
+from matrainer.tracking.base import Tracker, as_tracker_list
+from matrainer.tracking.provenance import capture_log_file, log_run_context
 from recordstream import (
     PredictionsSink,
     RecordSource,
@@ -122,7 +122,7 @@ class FastaiSegmenter(TorchRunner, ProgressReporting):
             no ``train_metrics``: a fastai ``Learner`` computes its metrics on the validation
             pass only, so the slot would accept a set and silently never call it.
         callbacks: fastai callbacks.
-        trackers: marainer trackers — one or a list.
+        trackers: matrainer trackers — one or a list.
         experiment_name / run_name: tracking identity.
         input_key / target_key: Record keys for the image and the per-pixel mask.
 
@@ -405,8 +405,8 @@ class FastaiSegmenter(TorchRunner, ProgressReporting):
         logger.info(f"deltaid fastai training: {self.experiment_name} ({self.run_name})")
         if self.train_set is None:
             raise ValueError("FastaiSegmenter.fit() requires a 'train_set'.")
-        # Provenance through marainer's plain FUNCTIONS — `runnable=self` so the hyperparameters
-        # and the resolved config come from marainer's ONE derivation rather than a dict this
+        # Provenance through matrainer's plain FUNCTIONS — `runnable=self` so the hyperparameters
+        # and the resolved config come from matrainer's ONE derivation rather than a dict this
         # backend transcribes for itself.
         trackers = self._live_trackers()
         manifest = log_run_context(trackers, runnable=self)
