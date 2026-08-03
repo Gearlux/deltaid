@@ -169,6 +169,44 @@ silently shrink the head.
 For `evaluate` / `test` / `predict` it is read off the **trained model**, never the eval dataset —
 a subset whose masks never show the last class would mis-size the metrics against the head.
 
+### Binary segmentation is `num_classes: 2`
+
+There is one target contract — `[N, C, H, W]` logits against an int64 `[N, H, W]` class-id mask —
+and binary is `C = 2`. deltaid ships no single-channel `[N, 1, H, W]` mode, and that is a decision
+rather than a gap: what a binary setup actually buys is **not scoring the background**, and you get
+that from a knob, not from a different tensor shape.
+
+The trap is real, though, so it is worth stating what it looks like. On a mask with ~2%
+foreground, a model that predicts **nothing but background**:
+
+| | value |
+|---|---|
+| `DiceLoss(mode="multiclass")` | **0.5052** ← the background's perfect score halves it |
+| `MulticlassJaccardIndex(average="macro")` | **0.4897** ← same dilution |
+| `DiceLoss(mode="multiclass", classes=[1])` | **0.9999** ← foreground only |
+| `DiceLoss(mode="binary")` | 0.9899 |
+| `MulticlassJaccardIndex(average=None)` | `[0.9795, 0.0]` ← the failure, named |
+
+So on an imbalanced binary task, score the foreground explicitly:
+
+```yaml
+num_classes: 2
+
+loss_fn: !class:DiceLoss@framework=torch
+  mode: multiclass
+  classes: [1]              # smp's own knob — the background is not averaged in
+
+val_metrics:
+  iou_per_class: !lazy:torchmetrics.classification.MulticlassJaccardIndex
+    average: null           # renders as the worst-first table, so 0.0 is the first row
+
+class_names: [background, foreground]
+```
+
+A `[N, 1, H, W]` branch would buy a second target shape, a second loss family, a second metric
+family and a second prediction contract — to reach a number `classes: [1]` already reaches from
+the contract that exists.
+
 ## Losses and metrics
 
 Off-the-shelf upstream classes, registered for discovery — deltaid reimplements none of them.
