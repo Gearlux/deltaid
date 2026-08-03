@@ -1,0 +1,408 @@
+"""``LightningSegmenter`` — the merged train / evaluate / test / predict segmentation runnable.
+
+Grouped by the decision each block pins, because most of them are silent when wrong: a slot that
+accepts a value and ignores it, a default that cannot be told apart from a user's choice, a metric
+that reports nothing. The end-to-end group at the bottom drives a real ``run()`` over synthetic
+records, which is what catches the wiring the unit groups each half-cover.
+"""
+
+from pathlib import Path
+from typing import Any, Dict, List, cast
+
+import numpy as np
+import pytest
+import pytorch_lightning as pl
+import torch
+import torch.nn as nn
+from confluid import Fluid, LazyClass, lazy_param_names, to_pydantic
+from recordstream import Mask, collate_records
+
+from deltaid.lightning_segmenter import LightningSegmenter, _per_record_masks
+
+NUM_CLASSES = 3
+SIDE = 32
+
+
+class _TinyNet(nn.Module):
+    """A 1x1-conv 'segmenter': [N, 3, H, W] -> [N, C, H, W], trainable, instant."""
+
+    def __init__(self, num_classes: int = NUM_CLASSES) -> None:
+        super().__init__()
+        self.num_classes = num_classes
+        self.head = nn.Conv2d(3, num_classes, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return cast(torch.Tensor, self.head(x))
+
+
+def _records(n: int = 4, classes: int = NUM_CLASSES) -> List[Dict[str, Any]]:
+    """Synthetic segmentation records in the shape the config pipeline produces."""
+    rng = np.random.default_rng(0)
+    return [
+        {
+            "image": torch.rand(3, SIDE, SIDE),
+            "mask": Mask(rng.integers(0, classes, (SIDE, SIDE)).astype(np.int64)),
+            "record_id": i,
+        }
+        for i in range(n)
+    ]
+
+
+def _segmenter(**kwargs: Any) -> LightningSegmenter:
+    params: Dict[str, Any] = {"model": _TinyNet(), "num_classes": NUM_CLASSES, "max_epochs": 1}
+    params.update(kwargs)
+    seg = LightningSegmenter(**params)
+    for slot in (seg.train_loader, seg.val_loader, seg.test_loader):
+        cast(Any, slot).kwargs.update(batch_size=2, num_workers=0, persistent_workers=False)
+    cast(Any, seg.lightning).kwargs.update(
+        max_epochs=1, enable_progress_bar=False, enable_model_summary=False, enable_checkpointing=False, logger=False
+    )
+    return seg
+
+
+# --------------------------------------------------------------------------- #
+# num_classes resolution
+# --------------------------------------------------------------------------- #
+class TestNumClassesResolution:
+    def test_an_explicit_count_is_used(self) -> None:
+        seg = _segmenter(model=nn.Identity(), num_classes=7)
+        seg.initialize()
+        assert seg.num_classes == 7
+
+    def test_a_concrete_models_head_wins_over_the_segmenters_arg(self) -> None:
+        """The head is authoritative — metrics sized against anything else would mis-score it."""
+        seg = _segmenter(model=_TinyNet(num_classes=5), num_classes=9)
+        seg.initialize()
+        assert seg.num_classes == 5
+
+    def test_a_lazy_models_pinned_kwarg_is_read_without_touching_the_data(self) -> None:
+        seg = _segmenter(model=LazyClass(_TinyNet, num_classes=4), num_classes=None)
+        seg.initialize()
+        assert seg.num_classes == 4
+
+    def test_it_falls_back_to_walking_the_mask_column(self) -> None:
+        """The last resort, and the reason `num_mask_classes` exists: a per-pixel target is an
+        array, so `recordstream.num_classes` (scalar-only, deliberately) cannot answer this."""
+        seg = _segmenter(model=LazyClass(_TinyNet), num_classes=None, train_set=_records(classes=3))
+        seg.initialize()
+        assert seg.num_classes == 3
+
+    def test_the_derived_count_is_injected_into_the_lazy_model(self) -> None:
+        seg = _segmenter(model=LazyClass(_TinyNet), num_classes=None, train_set=_records(classes=3))
+        seg.initialize()
+        assert not isinstance(seg.model, Fluid)
+        assert seg.model.num_classes == 3
+
+    def test_it_raises_when_nothing_can_supply_a_count(self) -> None:
+        seg = _segmenter(model=LazyClass(_TinyNet), num_classes=None, train_set=None)
+        with pytest.raises(RuntimeError, match="could not determine num_classes"):
+            seg.initialize()
+
+    def test_eval_reads_the_count_off_the_trained_model_not_the_dataset(self) -> None:
+        """An eval split may be a subset whose masks never show the last class; sizing the
+        metrics from it would score the model against a head it does not have."""
+        seg = _segmenter(model=_TinyNet(num_classes=5), num_classes=None, task="test")
+        seg.test_set = _records(classes=2)
+        seg.initialize()
+        assert seg.num_classes == 5
+
+
+# --------------------------------------------------------------------------- #
+# Task-shaped defaults are SENTINELS
+# --------------------------------------------------------------------------- #
+class TestSentinelDefaults:
+    def test_loss_defaults_to_cross_entropy_with_the_ignore_index(self) -> None:
+        seg = _segmenter(ignore_index=250)
+        seg.initialize()
+        assert isinstance(seg.loss_fn, nn.CrossEntropyLoss)
+        assert seg.loss_fn.ignore_index == 250
+
+    def test_an_explicitly_wired_loss_is_never_replaced(self) -> None:
+        """Why the default is a `None` sentinel rather than a live constructor default: a live
+        one makes "the user chose CrossEntropy" indistinguishable from "the user said nothing",
+        so a deliberately-chosen Dice loss would be silently discarded."""
+        chosen = nn.NLLLoss()
+        seg = _segmenter()
+        seg.loss_fn = chosen
+        seg.initialize()
+        assert seg.loss_fn is chosen
+
+    def test_the_metric_default_is_the_segmentation_pair(self) -> None:
+        seg = _segmenter()
+        seg.initialize()
+        assert set(seg.val_metrics.keys()) == {"val/miou", "val/dice_macro"}
+
+    def test_the_default_metrics_honour_the_ignore_index(self) -> None:
+        """The same knob must drop the void class from the SCORE as well as the loss —
+        otherwise the model is graded on pixels it was told to ignore."""
+        seg = _segmenter(ignore_index=250)
+        seg.initialize()
+        assert seg.val_metrics["val/miou"].ignore_index == 250
+
+    def test_resolution_is_idempotent_so_a_direct_step_call_works(self) -> None:
+        """`training_step` resolves the sentinels itself, so a test or a custom loop can call it
+        without `initialize()` — and calling it twice must not replace anything."""
+        seg = _segmenter()
+        seg.initialize()
+        loss = seg.loss_fn
+        seg._resolve_task_defaults()
+        assert seg.loss_fn is loss
+
+
+# --------------------------------------------------------------------------- #
+# Per-split metric slots
+# --------------------------------------------------------------------------- #
+class TestPerSplitMetrics:
+    def test_a_split_slot_ADDS_to_the_shared_set_for_that_split_only(self) -> None:
+        from torchmetrics.classification import MulticlassAccuracy
+
+        seg = _segmenter(val_metrics={"accuracy": LazyClass(MulticlassAccuracy)})
+        seg.initialize()
+        assert set(seg.val_metrics.keys()) == {"val/miou", "val/dice_macro", "val/accuracy"}
+        assert set(seg.train_metrics.keys()) == {"train/miou", "train/dice_macro"}
+
+    def test_all_four_slots_are_declared_constructor_params(self) -> None:
+        """A post-construction-only slot is invisible to `to_pydantic`, so navigaitor's form-spec
+        and StreamStudio would never offer it."""
+        fields = to_pydantic(LightningSegmenter).model_fields
+        assert {"metrics", "train_metrics", "val_metrics", "test_metrics"} <= set(fields)
+
+    def test_metrics_are_built_once_even_though_run_calls_initialize_every_time(self) -> None:
+        """`_metrics_built` is not tidiness: `is None` cannot tell "not built yet" from "wired
+        with a spec", and a second build would re-prefix `val/` into `val/val/`."""
+        seg = _segmenter()
+        seg.initialize()
+        seg.initialize()
+        assert all(name.startswith("val/") and not name.startswith("val/val/") for name in seg.val_metrics)
+
+    def test_the_shared_rule_comes_from_marainer(self) -> None:
+        """One combination rule across every backend AND both tasks — never re-derived here."""
+        import inspect
+
+        import deltaid.lightning_segmenter as module
+
+        assert "from marainer.metric_slots import" in inspect.getsource(module)
+
+
+# --------------------------------------------------------------------------- #
+# trackers: — the only output wiring, and a CONSTRUCTOR param
+# --------------------------------------------------------------------------- #
+class TestTrackers:
+    def test_trackers_is_a_constructor_param_that_admits_a_list(self) -> None:
+        """confluid gates LIST broadcast on the receiving slot's ANNOTATION, so as a
+        post-construction attribute typed `Optional[List[Tracker]]` a `trackers: [...]` YAML key
+        silently did NOTHING — the whole tracking chain unreachable from config while every unit
+        test passed, because tests assign `.trackers` in Python."""
+        assert "trackers" in to_pydantic(LightningSegmenter).model_fields
+
+    def test_the_constructor_stores_them_verbatim(self) -> None:
+        """Normalizing in the constructor would iterate the value, and a deferred `Fluid` is not
+        iterable (`'Class' object is not iterable`) — plus it would be functional work."""
+        marker = LazyClass(_TinyNet)
+        seg = _segmenter(trackers=marker)
+        assert seg.trackers is marker
+
+    def test_flowing_them_writes_back_so_a_fluid_is_not_rebuilt(self) -> None:
+        """`flow()` on a live object is idempotent, but a `Fluid` would be REBUILT on every
+        call — two MLflow runs for one training run."""
+        from marainer import CsvTracker
+
+        seg = _segmenter(trackers=LazyClass(CsvTracker))
+        first = seg._live_trackers()
+        assert seg._live_trackers()[0] is first[0]
+
+    def test_there_is_no_logger_slot(self) -> None:
+        """It named two different things and neither survived; `trackers:` is the one wiring."""
+        import inspect
+
+        assert "logger" not in inspect.signature(LightningSegmenter.__init__).parameters
+
+    def test_no_local_hyperparameter_derivation_survives(self) -> None:
+        """marainer owns the ONE derivation (`runnable=self`), so two backends cannot answer
+        "what were the hyperparameters?" differently."""
+        import inspect
+
+        import deltaid.lightning_segmenter as module
+
+        source = inspect.getsource(module)
+        assert "_config_params" not in source
+        assert "runnable=self" in source
+
+
+# --------------------------------------------------------------------------- #
+# The batch boundary
+# --------------------------------------------------------------------------- #
+class TestTheBatchBoundary:
+    def test_the_target_is_read_back_as_int64(self) -> None:
+        """albumentations returns an int32 mask, and CrossEntropyLoss rejects it with
+        *"expected target dtype to be Long or Byte, but got Int"*. The dtype is named by the
+        CALLER — recordstream honours the contract rather than deciding one."""
+        batch = collate_records(_records(2))
+        seg = _segmenter()
+        assert seg._targets(batch).dtype == torch.int64
+
+    def test_the_collate_is_the_generic_one(self) -> None:
+        """No bespoke deltaid collate — and the two keys arrive by DIFFERENT routes.
+
+        The mask is a typed `Mask` item, so `collate_records` stacks it to `[N, H, W]` itself.
+        The image is a live `torch.Tensor` (what `ToTensor` emits — an `NDArrayItem` cannot hold
+        one), which is a PLAIN record value, so the collate gathers it as a per-record LIST and
+        `batch_tensor` does the stacking at the model boundary. Both are recordstream's; deltaid
+        writes neither.
+        """
+        batch = collate_records(_records(3))
+        assert batch["mask"].shape == (3, SIDE, SIDE)  # stacked by the collate
+        assert isinstance(batch["image"], list) and len(batch["image"]) == 3  # gathered
+
+        from recordstream import batch_tensor
+
+        assert batch_tensor(batch, "image").shape == (3, 3, SIDE, SIDE)
+        assert batch_tensor(batch, "mask", dtype=torch.int64).shape == (3, SIDE, SIDE)
+
+    def test_predict_step_emits_the_contract_not_raw_logits(self) -> None:
+        """A sink reads `mask` / `probs` by NAME and cannot softmax on the caller's behalf —
+        only the model knows whether its head already did."""
+        seg = _segmenter()
+        seg.initialize()
+        out = seg.predict_step(collate_records(_records(2)), 0)
+        assert set(out) == {"logits", "probs", "mask"}
+        assert out["mask"].shape == (2, SIDE, SIDE)
+        assert out["mask"].dtype == torch.int64
+
+    def test_a_batched_output_is_sliced_to_one_entry_per_record(self) -> None:
+        """The sink contract is per-record while the model emits `[N, ...]`; handing the batch
+        over whole writes ONE entry for an N-record batch."""
+        preds = {"mask": torch.zeros(4, 8, 8), "probs": torch.zeros(4, 3, 8, 8)}
+        assert len(_per_record_masks(preds)) == 4
+
+    def test_predictions_reach_a_sink_paired_with_their_metadata(self) -> None:
+        written: List[Any] = []
+
+        class _Sink:
+            def write(self, prediction: Any, metadata: Any) -> None:
+                written.append((prediction, metadata))
+
+            def close(self) -> None:
+                pass
+
+        seg = _segmenter()
+        seg.initialize()
+        seg.predictions_sink = _Sink()
+        seg.predict_step(collate_records(_records(3)), 0)
+        assert len(written) == 3
+        assert [m["record_id"] for _, m in written] == [0, 1, 2]
+
+
+# --------------------------------------------------------------------------- #
+# Dispatch + the I/O contract
+# --------------------------------------------------------------------------- #
+class TestDispatchAndContract:
+    def test_the_entrypoint_markers_are_the_dispatch_table(self) -> None:
+        """A hand-written {task: method} dict restates them and drifts."""
+        import inspect
+
+        from recordstream.runnable import entrypoint_tasks, runnable_entrypoints
+
+        assert set(runnable_entrypoints(LightningSegmenter)) == {"fit", "evaluate", "test", "predict"}
+        assert "run_entrypoint(self, self.task)" in inspect.getsource(LightningSegmenter.run)
+        # The roles are what a discovery service reads to learn that ONE class both trains and
+        # evaluates — which is why there is no separate evaluator class to tag.
+        assert entrypoint_tasks(LightningSegmenter, "trainer") == ["fit"]
+        assert set(entrypoint_tasks(LightningSegmenter, "evaluator")) == {"evaluate", "test"}
+        assert entrypoint_tasks(LightningSegmenter, "predictor") == ["predict"]
+
+    def test_autograd_is_claimed_only_for_fit(self) -> None:
+        assert _segmenter(task="fit").__needs_autograd__ is True
+        assert _segmenter(task="predict").__needs_autograd__ is False
+
+    def test_the_outputs_raise_before_a_run(self) -> None:
+        seg = _segmenter(model=LazyClass(_TinyNet))
+        with pytest.raises(RuntimeError, match="only available after run"):
+            _ = seg.trained_model
+
+    def test_the_model_input_is_mandatory(self) -> None:
+        with pytest.raises(TypeError):
+            LightningSegmenter()  # type: ignore[call-arg]
+
+    def test_every_flowed_slot_is_lazy_declared(self) -> None:
+        assert {"model", "train_set", "optimizer", "lightning"} <= lazy_param_names(LightningSegmenter)
+
+
+# --------------------------------------------------------------------------- #
+# End to end — the wiring the unit groups each half-cover
+# --------------------------------------------------------------------------- #
+class TestEndToEnd:
+    def test_fit_trains_computes_metrics_and_exposes_them(self) -> None:
+        seg = _segmenter(train_set=_records(8), model=LazyClass(_TinyNet))
+        seg.val_set = _records(4)
+        seg.run()
+
+        assert seg.num_classes == NUM_CLASSES
+        computed = seg.computed_metrics
+        assert "val/miou" in computed and "val/loss" in computed
+        assert 0.0 <= computed["val/miou"] <= 1.0
+        assert isinstance(seg.trained_model, nn.Module)
+
+    def test_the_loss_actually_descends(self) -> None:
+        """A finite loss is not evidence of training — a badly wired one stays finite too.
+
+        Learnable data on purpose: the mask is the argmax over the input's three channels, which
+        a 1x1 conv can fit exactly. Over random masks the loss would sit at ``ln(C)`` however
+        well the optimizer was wired, so the test would be measuring nothing. What is asserted is
+        the DESCENT rather than an absolute value — that is the claim, and it is what says the
+        optimizer reached the parameters at all.
+        """
+        learnable = [
+            {"image": img, "mask": Mask(img.argmax(dim=0).numpy().astype(np.int64))}
+            for img in (torch.rand(3, SIDE, SIDE) for _ in range(8))
+        ]
+        losses: List[float] = []
+
+        class _Recorder(pl.Callback):
+            def on_train_epoch_end(self, trainer: Any, module: Any) -> None:
+                losses.append(float(trainer.callback_metrics["train/loss_epoch"]))
+
+        seg = _segmenter(train_set=learnable, model=LazyClass(_TinyNet))
+        cast(Any, seg.lightning).kwargs.update(max_epochs=12, callbacks=[_Recorder()])
+        seg.run()
+
+        assert len(losses) == 12
+        assert losses[-1] < losses[0], f"loss did not descend: {losses[0]:.4f} -> {losses[-1]:.4f}"
+
+    def test_test_writes_a_metrics_sidecar(self, tmp_path: Path) -> None:
+        import json
+
+        seg = _segmenter(task="test", model=_TinyNet())
+        seg.test_set = _records(4)
+        seg.metrics_sidecar_path = str(tmp_path / "metrics.json")
+        seg.run()
+
+        payload = json.loads((tmp_path / "metrics.json").read_text())
+        assert payload["experiment_name"] == "deltaid_segmentation"
+        assert "test/miou" in payload["metrics"]
+
+    def test_predict_streams_every_record_to_the_sink_and_closes_it(self) -> None:
+        written: List[Any] = []
+        closed: List[bool] = []
+
+        class _Sink:
+            def write(self, prediction: Any, metadata: Any) -> None:
+                written.append(prediction)
+
+            def close(self) -> None:
+                closed.append(True)
+
+        seg = _segmenter(task="predict", model=_TinyNet())
+        seg.test_set = _records(6)
+        seg.predictions_sink = _Sink()
+        seg.run()
+
+        assert len(written) == 6
+        assert closed == [True]
+
+    def test_evaluate_and_test_are_the_same_class(self) -> None:
+        """One runnable, four entry points — there is no separate evaluator class."""
+        seg = _segmenter(task="evaluate", model=_TinyNet())
+        seg.val_set = _records(4)
+        seg.run()
+        assert "val/miou" in seg.computed_metrics

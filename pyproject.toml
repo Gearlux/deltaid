@@ -1,26 +1,99 @@
 [project]
 name = "deltaid"
 version = "0.1.0"
-description = "Semantic-segmentation models and a standard-Lightning segmenter (DeepLabV3+ / smp)."
+description = "Semantic segmentation across training backends, driven by one config (smp models)."
 authors = [{name = "Taidal"}]
 license = {text = "MIT"}
+# The CORE is backend-free: `pip install deltaid` gives the CLI and the config surface only, so a
+# machine that has not chosen a training framework never installs one. Every ML framework lives in
+# the extra of the backend that needs it (see `[project.optional-dependencies]`), and every
+# backend-owned name in `deltaid/__init__.py` resolves lazily to match.
 dependencies = [
-    # marainer provides OPTIONAL tracking + torch utilities (ensure_record_dataset /
-    # load_lightning_checkpoint). deltaid's LightningSegmenter is a standard pl.LightningModule and
-    # trains without marainer (a couple of tracking lines would drop out).
-    "marainer[lightning,mlflow,tensorboard]>=0.1.0",
-    "confluid>=0.1.0",
+    "confluid>=0.3.0",
     "recordstream>=0.1.0",
+    "liquifai>=0.1.0",
     "loggair>=0.1.0",
-    "torch",
-    "torchvision",
-    "torchmetrics",
-    "pytorch-lightning",
-    "segmentation-models-pytorch>=0.3.4",
+    # marainer is the TRACKING library (and the metric-slot rule + artifact writers). Its own
+    # core install is light — no torch — so it belongs here rather than in a backend extra.
+    "marainer>=0.1.0",
 ]
 requires-python = ">=3.12"
 
 [project.optional-dependencies]
+# One extra per training backend. `aisland framework set torch lightning` installs the ones the
+# workspace has selected across every project that declares them (see [tool.aisland] below).
+#
+# `torch` is the BASE of the three torch-backed backends: it carries the model zoo, the losses,
+# the metrics and the preprocessing that `lightning` and `fastai` also need, so each of those
+# declares `deltaid[torch]` rather than restating the list. That is not just economy — it is what
+# makes "the config does not change between backends" true of the INSTALL as well.
+torch = [
+    "marainer[torch]>=0.1.0",
+    "recordstream[torch]>=0.1.0",
+    "torch",
+    "torchvision",
+    "torchmetrics",
+    # `smp.create_model` (the SegmentationModelPytorch zoo) and `smp.losses` (the region-overlap
+    # loss family `torch_segmentation.py` registers).
+    "segmentation-models-pytorch>=0.5.0",
+    # The image+mask preprocessing chain every example config drives: one joint draw resizes the
+    # image and its mask together through recordstream's op-family dispatch.
+    "albumentations>=2.0",
+]
+lightning = [
+    "deltaid[torch]",
+    "marainer[lightning]>=0.1.0",
+    "pytorch-lightning",
+]
+# TWO upper bounds, both upstream breaks and both removable when upstream fixes them — do NOT
+# delete them as "hardcoded versions". `fastcore<2`: fastai's own `Optimizer.set_hypers` still
+# calls `L.starmap`, which fastcore 2.x removed, so `fit_one_cycle` dies at the first
+# `create_opt()`; fastai declares only `fastcore>=1.8.0`, so a fresh resolve picks 2.x and EVERY
+# fastai run fails. `fastprogress<1.1`: 1.1 added a `python-fasthtml` dependency — a progress bar
+# pulling in a web framework — which drags `starlette` past what other workspace packages pin.
+fastai = [
+    "deltaid[torch]",
+    "fastai>=2.7",
+    "fastcore<2",
+    "fastprogress<1.1",
+]
+# Keras 3 is an API, not an engine — it needs ONE compute backend underneath (torch / TF / jax),
+# and `recordstream.keras` (which `deltaid/_keras.py` imports through) selects whichever is
+# installed. So each Keras-family extra names its OWN engine; a `tensorflow = ["deltaid[keras]",
+# …]` chain would drag torch into a TensorFlow install, which is the opposite of what selecting
+# an extra is for. Neither names `deltaid[torch]`: the smp zoo and torchmetrics belong to the
+# torch backends, and a Keras config wires `KerasUNet` + `keras.losses` instead.
+keras = [
+    "keras>=3.0",
+    "torch",                # the engine `deltaid[keras]` runs Keras on
+    # The PyDataset batching adapter (`recordstream.keras.RecordSequence`) + the KERAS_BACKEND
+    # import ordering this backend depends on.
+    "recordstream[keras]>=0.1.0",
+    # Tracking for a Keras run. marainer[keras], NOT marainer[tensorflow]: the callback needs
+    # the Keras API, not the TensorFlow engine.
+    "marainer[keras]>=0.1.0",
+    # The image+mask preprocessing chain the example config drives — one joint albumentations
+    # draw resizes both. Shared with the torch extra, restated because neither includes it.
+    "albumentations>=2.0",
+]
+tensorflow = [
+    "keras>=3.0",           # Keras 3 IS tf.keras in TF >= 2.16
+    "tensorflow>=2.16",     # ...this extra's engine
+    "recordstream[keras]>=0.1.0",
+    "marainer[keras]>=0.1.0",
+    "albumentations>=2.0",
+]
+# `transformers` runs its models on torch here, so this extra names torch's stack — but NOT
+# `deltaid[torch]`: a SegFormer fine-tune has no use for the smp zoo or its losses (the model
+# computes its own from `labels=`), and the metrics are plain numpy functions.
+huggingface = [
+    "transformers>=4.40",
+    "accelerate>=0.30",     # what `Trainer` uses for device/distribution placement
+    "torch",
+    "recordstream[torch]>=0.1.0",
+    "marainer[torch]>=0.1.0",
+    "albumentations>=2.0",
+]
 dev = [
     "black>=24.0.0,<25.0.0",
     "isort>=5.13.0,<6.0.0",
@@ -29,6 +102,13 @@ dev = [
     "pytest>=7.0.0,<9.0.0",
     "pytest-cov>=4.0.0,<7.0.0",
 ]
+
+# Which training backends this project OFFERS. `aisland framework list` reads it; what actually
+# installs is the workspace-wide selection in the committed `config.toml`, so a machine that has
+# not selected `lightning` builds deltaid without torch.
+[tool.aisland]
+frameworks = ["torch", "lightning", "fastai", "keras", "tensorflow", "huggingface"]
+trackers = ["mlflow", "tensorboard"]
 
 [project.scripts]
 deltaid = "deltaid.cli:main"
@@ -40,8 +120,37 @@ deltaid = "deltaid.cli:main"
 [project.entry-points."liquifai.apps"]
 deltaid = "deltaid.cli:app"
 
+# ONE entry point per REGISTERING module — never the package. `import deltaid` registers nothing
+# (every backend-owned name is lazy, so a machine without torch never imports it), so discovery
+# runs entirely off this table: a scanner imports each module named here, and the import is what
+# executes the `@configurable` decorators. A module missing from this list registers NOTHING, and
+# the failure is silent in every way a developer would notice — a dotted path in YAML still
+# imports the module itself, and the CLI imports its own backend, so only navigaitor's pickers,
+# the form-specs and the StreamStudio palette go blind, by offering FEWER options.
+#
+# Naming: `deltaid-<backend>` for a runnable, `deltaid-<backend>-model` for a zoo wrapper,
+# `deltaid-<framework>-segmentation` for a loss/metric set. After changing this table, reinstall
+# the editable (`uv pip install -e ./deltaid --no-deps`) for the metadata to take effect.
+# `tests/test_entry_points.py` DERIVES the expectation from the tree, in both directions.
 [project.entry-points."confluid.configurables"]
-deltaid = "deltaid"
+deltaid-lightning = "deltaid.lightning_segmenter"
+deltaid-torch = "deltaid.torch_segmenter"
+deltaid-fastai = "deltaid.fastai_segmenter"
+deltaid-keras = "deltaid.keras_segmenter"
+deltaid-tensorflow = "deltaid.tensorflow_segmenter"
+# The Hub runnable + its zoo wrapper. There is deliberately no `deltaid-huggingface-segmentation`:
+# an `AutoModelForSemanticSegmentation` computes its own loss from `labels=`, so the backend
+# registers nothing for a config to wire.
+deltaid-huggingface = "deltaid.huggingface_segmenter"
+deltaid-huggingface-model = "deltaid.huggingface_model"
+deltaid-smp-model = "deltaid.smp_model"
+deltaid-torch-unet = "deltaid.unet.torch_unet"
+deltaid-keras-unet = "deltaid.unet.keras_unet"
+deltaid-tensorflow-unet = "deltaid.unet.tensorflow_unet"
+deltaid-torch-segmentation = "deltaid.torch_segmentation"
+# There is deliberately no `deltaid-tensorflow-segmentation`: TF >= 2.16 exposes Keras 3 as
+# `tf.keras`, so the TensorFlow backend's loss/metric set IS the Keras one, registered here.
+deltaid-keras-segmentation = "deltaid.keras_segmentation"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -91,5 +200,8 @@ module = [
     "torchmetrics.*",
     "pytorch_lightning.*",
     "segmentation_models_pytorch.*",
+    "keras.*",
+    "tensorflow.*",
+    "transformers.*",
 ]
 ignore_missing_imports = true
