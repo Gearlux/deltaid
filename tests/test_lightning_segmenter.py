@@ -48,6 +48,18 @@ def _records(n: int = 4, classes: int = NUM_CLASSES) -> List[Dict[str, Any]]:
     ]
 
 
+def _target_masks(n: int = 2) -> torch.Tensor:
+    """An int64 ``[N, H, W]`` target — read back exactly as the segmenter reads it.
+
+    Through `collate_records` + `batch_tensor` rather than stacking the `Mask`es directly,
+    because a `Mask` is an ndarray SUBCLASS and `torch.as_tensor` on one takes the memoryview
+    path and raises — the read-back is the thing that knows how to do this.
+    """
+    from recordstream import batch_tensor
+
+    return cast(torch.Tensor, batch_tensor(collate_records(_records(n)), "mask", dtype=torch.int64))
+
+
 def _segmenter(**kwargs: Any) -> LightningSegmenter:
     params: Dict[str, Any] = {"model": _TinyNet(), "num_classes": NUM_CLASSES, "max_epochs": 1}
     params.update(kwargs)
@@ -406,3 +418,99 @@ class TestEndToEnd:
         seg.val_set = _records(4)
         seg.run()
         assert "val/miou" in seg.computed_metrics
+
+
+# --------------------------------------------------------------------------- #
+# The per-class metric — computed, and no longer dropped
+# --------------------------------------------------------------------------- #
+class _RecordingTracker:
+    """A tracker that keeps what it was handed, so the report can be asserted on."""
+
+    def __init__(self) -> None:
+        self.texts: List[Any] = []
+        self.figures: List[Any] = []
+        self.metrics: List[Any] = []
+
+    def log_metrics(self, values: Any, step: Any = None) -> None:
+        self.metrics.append((values, step))
+
+    def log_text(self, name: str, text: str, step: Any = None) -> None:
+        self.texts.append((name, text, step))
+
+    def log_figure(self, name: str, figure: Any, step: Any = None) -> None:
+        self.figures.append((name, figure, step))
+
+
+class TestThePerClassReport:
+    """A `[C]` vector cannot go through `log_dict` — Lightning's `convert_tensors_to_scalars`
+    RAISES on it — so it goes out through the tracker TEXT channel instead of being dropped."""
+
+    def _segmenter(self, **kwargs: Any) -> LightningSegmenter:
+        from torchmetrics.classification import MulticlassJaccardIndex
+
+        seg = _segmenter(
+            val_metrics={"iou_per_class": LazyClass(MulticlassJaccardIndex, average=None)},
+            **kwargs,
+        )
+        seg.initialize()
+        return seg
+
+    def test_the_scalars_still_go_to_log_dict_and_the_vector_does_not(self) -> None:
+        """The whole reason the split exists: one `log_dict` call carrying a `[C]` tensor kills
+        the validation loop on the first epoch."""
+        seg = self._segmenter()
+        logged: List[Any] = []
+        seg.log_dict = lambda values, *a, **k: logged.append(values)  # type: ignore[method-assign]
+        seg.val_metrics.update(torch.randn(2, NUM_CLASSES, SIDE, SIDE), _target_masks(2))
+        seg._report_epoch_metrics(seg.val_metrics)
+
+        assert logged and set(logged[0]) == {"val/miou", "val/dice_macro"}
+        assert all(isinstance(v, float) for v in logged[0].values()), "a vector reached log_dict"
+
+    def test_the_vector_reaches_every_trackers_text_channel(self) -> None:
+        tracker = _RecordingTracker()
+        seg = self._segmenter(trackers=[tracker])
+        seg.log_dict = lambda values, *a, **k: None  # type: ignore[method-assign]
+        seg.val_metrics.update(torch.randn(2, NUM_CLASSES, SIDE, SIDE), _target_masks(2))
+        seg._report_epoch_metrics(seg.val_metrics)
+
+        assert [name for name, _, _ in tracker.texts] == ["val/iou_per_class"]
+        table = tracker.texts[0][1]
+        assert "class" in table and "iou_per_class" in table and f"{NUM_CLASSES} " not in table.splitlines()[0]
+
+    def test_the_class_names_label_the_rows(self) -> None:
+        """Unlike classification there is no label map to derive them from — a mask carries ids,
+        not names — so they are a config knob and default to indices."""
+        tracker = _RecordingTracker()
+        seg = self._segmenter(trackers=[tracker], class_names=["pet", "background", "boundary"])
+        seg.log_dict = lambda values, *a, **k: None  # type: ignore[method-assign]
+        seg.val_metrics.update(torch.randn(2, NUM_CLASSES, SIDE, SIDE), _target_masks(2))
+        seg._report_epoch_metrics(seg.val_metrics)
+
+        assert "boundary" in tracker.texts[0][1]
+
+    def test_no_figure_unless_plot_metrics_asks_for_one(self) -> None:
+        """matplotlib is the `marainer[plot]` extra and a figure is real work every eval epoch;
+        the table costs nothing, so it is the default and the chart is opt-in."""
+        tracker = _RecordingTracker()
+        seg = self._segmenter(trackers=[tracker])
+        seg.log_dict = lambda values, *a, **k: None  # type: ignore[method-assign]
+        seg.val_metrics.update(torch.randn(2, NUM_CLASSES, SIDE, SIDE), _target_masks(2))
+        seg._report_epoch_metrics(seg.val_metrics)
+        assert tracker.figures == []
+
+        plotting = self._segmenter(trackers=[tracker], plot_metrics=True)
+        plotting.log_dict = lambda values, *a, **k: None  # type: ignore[method-assign]
+        plotting.val_metrics.update(torch.randn(2, NUM_CLASSES, SIDE, SIDE), _target_masks(2))
+        plotting._report_epoch_metrics(plotting.val_metrics)
+        assert [name for name, _, _ in tracker.figures] == ["val/iou_per_class"]
+
+    def test_a_run_with_only_scalar_metrics_reports_nothing_extra(self) -> None:
+        """The selection is by SHAPE, so the default metric pair must produce no table at all."""
+        tracker = _RecordingTracker()
+        seg = _segmenter(trackers=[tracker])
+        seg.initialize()
+        seg.log_dict = lambda values, *a, **k: None  # type: ignore[method-assign]
+        seg.val_metrics.update(torch.randn(2, NUM_CLASSES, SIDE, SIDE), _target_masks(2))
+        seg._report_epoch_metrics(seg.val_metrics)
+        assert tracker.texts == []

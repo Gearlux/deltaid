@@ -94,6 +94,28 @@ huggingface = [
     "marainer[torch]>=0.1.0",
     "albumentations>=2.0",
 ]
+# JAX and MLX bring NO zoo to wrap — `transformers` dropped Flax in v5, and `mlx-image` hard-pins
+# a `huggingface_hub` this workspace cannot take — so each of these installs only its framework
+# and trains `deltaid/unet/`'s shared spec. Neither names `deltaid[torch]`: their losses are their
+# own framework's plain functions, and the metrics are written out in numpy/jnp/mx.
+jax = [
+    "jax>=0.4",
+    "flax>=0.8",            # NNX is the current Flax module API
+    "optax>=0.2",           # the optimizers and losses; JAX itself ships neither
+    # The PyDataset batching adapter (`recordstream.keras.RecordSequence`), reused verbatim —
+    # batching a record stream is not a JAX problem.
+    "recordstream[keras]>=0.1.0",
+    "marainer>=0.1.0",
+    "albumentations>=2.0",
+]
+mlx = [
+    # Apple silicon only — the marker keeps `pip install deltaid[mlx]` from failing outright
+    # elsewhere, so the extra stays installable (and empty) on any machine.
+    "mlx>=0.15; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "recordstream[keras]>=0.1.0",
+    "marainer>=0.1.0",
+    "albumentations>=2.0",
+]
 dev = [
     "black>=24.0.0,<25.0.0",
     "isort>=5.13.0,<6.0.0",
@@ -107,7 +129,7 @@ dev = [
 # installs is the workspace-wide selection in the committed `config.toml`, so a machine that has
 # not selected `lightning` builds deltaid without torch.
 [tool.aisland]
-frameworks = ["torch", "lightning", "fastai", "keras", "tensorflow", "huggingface"]
+frameworks = ["torch", "lightning", "fastai", "keras", "tensorflow", "huggingface", "jax", "mlx"]
 trackers = ["mlflow", "tensorboard"]
 
 [project.scripts]
@@ -151,6 +173,14 @@ deltaid-torch-segmentation = "deltaid.torch_segmentation"
 # There is deliberately no `deltaid-tensorflow-segmentation`: TF >= 2.16 exposes Keras 3 as
 # `tf.keras`, so the TensorFlow backend's loss/metric set IS the Keras one, registered here.
 deltaid-keras-segmentation = "deltaid.keras_segmentation"
+# The jax and mlx runnables plus their shared-spec models. Neither has a zoo to wrap, hence a
+# `*-unet` entry and no `*-model` one; and neither registers losses — optax ships functions and
+# `mlx.nn.losses` ships functions too, so those are resolved by NAME and there is nothing for the
+# registry to tag.
+deltaid-jax = "deltaid.jax_segmenter"
+deltaid-flax-unet = "deltaid.unet.flax_unet"
+deltaid-mlx = "deltaid.mlx_segmenter"
+deltaid-mlx-unet = "deltaid.unet.mlx_unet"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -203,5 +233,9 @@ module = [
     "keras.*",
     "tensorflow.*",
     "transformers.*",
+    "jax.*",
+    "flax.*",
+    "optax.*",
+    "mlx.*",
 ]
 ignore_missing_imports = true

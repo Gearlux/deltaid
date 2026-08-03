@@ -54,6 +54,7 @@ from marainer.run_names import generate_run_name, run_prefix
 from marainer.torch import Device, build_metric_collection, resolve_device, scalar_metrics
 from marainer.tracking.base import Tracker, as_tracker_list
 from marainer.tracking.provenance import capture_log_file
+from marainer.tracking.render import per_class_vectors, render_vector_as_figure, render_vector_as_table
 from recordstream import (
     PredictionsSink,
     RecordSource,
@@ -120,6 +121,8 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
             weights, which is what a smoke run wants.
         grad_clip: Clip gradients to this global norm before each ``step()``. ``None`` disables.
         trackers: marainer trackers — one or a list.
+        class_names: Labels for the per-class metric report, in class-id order; indices otherwise.
+        plot_metrics: ALSO send each per-class metric to the trackers as a matplotlib bar chart.
 
     Post-construction slots (YAML / broadcasting): ``val_set``, ``optimizer``,
     ``train/val/test_loader``, ``loss_fn``, ``predictions_sink``, ``metrics_sidecar_path``.
@@ -148,6 +151,8 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
         checkpoint_dir: Optional[str] = None,
         grad_clip: Optional[float] = None,
         trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
+        class_names: Optional[List[str]] = None,
+        plot_metrics: bool = False,
     ) -> None:
         super().__init__()
         # `nn.Module`, not `Lazy[nn.Module]`: the DEFERRED-ness is declared once, on the ctor
@@ -197,6 +202,8 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
         self.metrics_sidecar_path: Optional[str] = None
         # Stored VERBATIM (lazy-init mandate: the constructor does no work).
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        self.class_names: Optional[List[str]] = list(class_names) if class_names else None
+        self.plot_metrics = plot_metrics
         self._history: Dict[str, List[float]] = {}
         self._computed_metrics: Dict[str, float] = {}
         self._device: torch.device = torch.device("cpu")
@@ -403,20 +410,47 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
                 metrics.update(logits, y)
         return total / batches if batches else float("nan")
 
-    def _epoch_metrics(self, collection: Optional[MetricCollection]) -> Dict[str, float]:
+    def _epoch_metrics(self, collection: Optional[MetricCollection], step: Optional[int] = None) -> Dict[str, float]:
         """Compute and RESET a split's metrics — the bookkeeping a ``Trainer`` hides.
 
-        Only the SCALARS are returned: `Tracker.log_metrics` is a `{name: float}` channel, and
-        `scalar_metrics` drops the rest. For segmentation the useful non-scalar is a per-class
-        VECTOR (`MulticlassJaccardIndex(average=None)`), which currently vanishes here — see
-        `TASKS.md`. That is the same gap the Lightning backend has, deliberately: the two
-        backends must report identically.
+        Only the SCALARS are RETURNED, because `Tracker.log_metrics` is a `{name: float}` channel.
+        The per-class VECTORS (`MulticlassJaccardIndex(average=None)`) go out through the trackers'
+        TEXT channel instead, from :meth:`_report_per_class` — the same reporting the Lightning
+        backend does from `_report_epoch_metrics`, which matters more here than it looks: the two
+        backends exist to be compared, so a metric one of them silently drops would make the
+        comparison a lie.
         """
         if collection is None:
             return {}
-        values = scalar_metrics(collection.compute())
+        computed = collection.compute()
+        self._report_per_class(computed, step=step)
+        values = scalar_metrics(computed)
         collection.reset()
         return values
+
+    def _report_per_class(self, values: Any, step: Optional[int] = None) -> None:
+        """Send every per-class VECTOR to the log and to each tracker's text (and figure) channel.
+
+        Which computed values ARE per-class vectors is marainer's rule
+        (:func:`~marainer.tracking.render.per_class_vectors` — a flat numeric sequence of length
+        >= 2, by SHAPE not by metric name), and so are the renderers; this decides only WHEN and
+        WHERE. Identical to the Lightning backend's, minus the sanity-check guard: this loop has
+        no sanity check to skip.
+        """
+        trackers = self._live_trackers()
+        for payload in per_class_vectors(values, self.class_names or None):
+            table = render_vector_as_table(payload["name"], payload["values"], payload["class_names"])
+            logger.info(table)
+            # Rendered ONCE per report, not once per tracker: a figure is real work.
+            figure = (
+                render_vector_as_figure(payload["name"], payload["values"], payload["class_names"])
+                if self.plot_metrics and trackers
+                else None
+            )
+            for tracker in trackers:
+                tracker.log_text(payload["name"], table, step=step)
+                if figure is not None:
+                    tracker.log_figure(payload["name"], figure, step=step)
 
     # ---- the four entry points ---------------------------------------------- #
     @entrypoint("fit", role="trainer", primary=True)
@@ -434,10 +468,10 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
 
         for epoch in range(self.max_epochs):
             logs: Dict[str, float] = {"train/loss": self._train_epoch(train_loader, optimizer)}
-            logs.update(self._epoch_metrics(self.train_metrics))
+            logs.update(self._epoch_metrics(self.train_metrics, step=epoch))
             if loaders["val"] is not None:
                 logs["val/loss"] = self._eval_epoch(cast(DataLoader[Any], loaders["val"]), self.val_metrics)
-                logs.update(self._epoch_metrics(self.val_metrics))
+                logs.update(self._epoch_metrics(self.val_metrics, step=epoch))
             for tracker in trackers:
                 tracker.log_metrics(logs, step=epoch)
             for key, value in logs.items():

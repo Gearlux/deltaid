@@ -342,6 +342,73 @@ huggingface: !scope:framework=huggingface
     model_name: nvidia/segformer-b0-finetuned-ade-512-512
     pretrained: true
 
+# --- jax: the loop written out, and jitted ----------------------------------
+# The closest sibling of the tensorflow block: both replace `fit()` with a traced
+# step function, and the differences between them are the differences between the
+# two programming models. `nnx.value_and_grad` differentiates a PURE FUNCTION of
+# (model, batch); `nnx.Optimizer` applies the update in place; the whole thing is
+# jitted ONCE and reused, because a fresh `jit` per epoch retraces the graph every
+# time and ends up slower than the eager loop it replaced.
+#
+# Channels-LAST like keras/tensorflow, so the same shortened preprocess chain.
+#
+# Losses, metrics and the optimizer are NAMES, not `!class:` tags: optax ships
+# plain FUNCTIONS and factories, so there is no class for a tag to resolve. That
+# is also why `--framework jax` imports no registrations module at all.
+jax: !scope:framework=jax
+  runnable: !class:deltaid.JaxSegmenter
+    learning_rate: 0.001
+    jit: true                       # turn OFF to read a traceback from inside a step
+    val_metrics: [mean_iou, pixel_accuracy, iou_per_class]
+  model: !lazy:deltaid.FlaxUNet
+    input_shape: [224, 224, 3]
+  preprocess:
+    - !class:recordstream.ops.image.ConvertToMask
+      field: segmentation_mask
+      output: mask
+    - !class:recordstream.ops.formula.FormulaOp
+      field: mask
+      formula: a - 1
+    - !class:recordstream.ops.structure.DropField
+      key: segmentation_mask
+    - !class:albumentations.Resize
+      height: 224
+      width: 224
+    - !class:albumentations.Normalize
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+
+# --- mlx: Apple silicon, unified memory -------------------------------------
+# The only backend whose batch path does genuinely LESS than the others: CPU and
+# GPU share memory, so there is no device transfer anywhere. What it costs
+# instead is `mx.eval` — MLX arrays are LAZY, and omitting the eval does not
+# raise, it grows the graph until memory runs out.
+#
+# `MlxUNet` is the fifth implementation of the shared spec, and the fifth to
+# report 488,739 parameters for 3 classes.
+mlx: !scope:framework=mlx
+  runnable: !class:deltaid.MlxSegmenter
+    learning_rate: 0.001
+    optimizer: Adam                 # a NAME: mlx.optimizers ships CLASSES (optax ships factories)
+    val_metrics: [mean_iou, pixel_accuracy, iou_per_class]
+  model: !lazy:deltaid.MlxUNet
+    input_shape: [224, 224, 3]
+  preprocess:
+    - !class:recordstream.ops.image.ConvertToMask
+      field: segmentation_mask
+      output: mask
+    - !class:recordstream.ops.formula.FormulaOp
+      field: mask
+      formula: a - 1
+    - !class:recordstream.ops.structure.DropField
+      key: segmentation_mask
+    - !class:albumentations.Resize
+      height: 224
+      width: 224
+    - !class:albumentations.Normalize
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+
 # ---------------------------------------------------------------------------
 # Metrics — the shared set, plus one that only validation computes
 # ---------------------------------------------------------------------------
@@ -350,14 +417,23 @@ huggingface: !scope:framework=huggingface
 # rather than restating it, and a same-named entry overrides).
 #
 # Left unset, `metrics:` defaults to mean IoU + macro Dice, sized from
-# num_classes. Uncomment to see the per-class breakdown on validation only —
-# `average: null` makes MulticlassJaccardIndex return one IoU per class, which
-# is the report a segmentation run actually wants and which costs nothing extra
-# to compute since the metric is already accumulating the confusion counts.
+# num_classes. `val_metrics:` below adds the per-class breakdown on VALIDATION
+# only — `average: null` makes MulticlassJaccardIndex return one IoU per class,
+# which is the report a segmentation run actually wants and which costs nothing
+# extra to compute, since the metric is already accumulating the counts.
 #
-# val_metrics:
-#   iou_per_class: !lazy:torchmetrics.classification.MulticlassJaccardIndex
-#     average: null
+# A `[C]` VECTOR cannot go through Lightning's `log_dict` (its
+# `convert_tensors_to_scalars` raises on anything that is not one number), so it
+# is reported through the trackers' TEXT channel instead: a table sorted
+# WORST-CLASS-FIRST, printed to the log and logged to every wired tracker. Set
+# `plot_metrics: true` on the runnable to also get a bar chart (needs
+# `marainer[plot]`). `class_names:` labels the rows — omit it and the classes are
+# numbered, which is readable but not informative.
+val_metrics:
+  iou_per_class: !lazy:torchmetrics.classification.MulticlassJaccardIndex
+    average: null
+
+class_names: [pet, background, boundary]
 
 # ---------------------------------------------------------------------------
 # Where the results go

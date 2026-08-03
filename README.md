@@ -4,16 +4,17 @@
 
 One `runnable:` + `task:` YAML, three verbs, and a model slot that reaches every architecture
 [`segmentation_models_pytorch`](https://github.com/qubvel/segmentation_models.pytorch) ships.
-Six training backends today — **PyTorch Lightning**, a **hand-written torch loop**, a
-**fastai `Learner`**, **Keras 3**, a native **TensorFlow** `tf.data` + `GradientTape` loop, and
-**HuggingFace `transformers`** — and swapping between them is one flag, not one config.
+**Eight** training backends — **PyTorch Lightning**, a **hand-written torch loop**, a
+**fastai `Learner`**, **Keras 3**, a native **TensorFlow** `tf.data` + `GradientTape` loop,
+**HuggingFace `transformers`**, a jitted **JAX/optax** loop and Apple's **MLX** — and swapping
+between them is one flag, not one config.
 
 Each segmenter reads like a textbook example for its framework: no framework of our own sits in
 between.
 
 ```bash
 pip install 'git+https://github.com/Gearlux/deltaid.git@main#egg=deltaid[lightning]'
-# or: deltaid[torch] / deltaid[fastai] / deltaid[keras] / deltaid[tensorflow] / deltaid[huggingface]
+# or: deltaid[torch] / [fastai] / [keras] / [tensorflow] / [huggingface] / [jax] / [mlx]
 
 deltaid train    examples/train_unet_oxford_pets.yaml
 deltaid evaluate examples/train_unet_oxford_pets.yaml
@@ -94,7 +95,7 @@ Two kinds, and they answer different questions:
 |---|---|---|---|
 | `SegmentationModelPytorch` | somebody else's weights (smp) | the zoo — `arch`, `encoder_name`, `encoder_weights` | the top level |
 | `HuggingFaceSegmentationModel` | somebody else's weights (the Hub) | the zoo — `model_name`, `pretrained` | the top level |
-| `TorchUNet` / `KerasUNet` / `TensorFlowUNet` | **nothing** | the architecture — `widths`, `bottleneck_width`, `seed` | `deltaid/unet/` |
+| `TorchUNet` / `KerasUNet` / `TensorFlowUNet` / `FlaxUNet` / `MlxUNet` | **nothing** | the architecture — `widths`, `bottleneck_width`, `seed` | `deltaid/unet/` |
 
 For real work prefer a zoo wrapper: a small net trained from scratch loses to a pretrained encoder
 every time (in the table above, SegFormer-b0 reaches mIoU 0.659 where the from-scratch U-Nets reach
@@ -103,7 +104,7 @@ is torch-only and `keras.applications` ships no segmentation models, so a cross-
 built on a zoo could never include Keras, TensorFlow, Flax or MLX. `deltaid/unet/spec.py` states one
 U-Net once and *derives* the trainable-parameter count from it (**488,739** for 3 classes), so every
 implementation is checked against that claim rather than against whichever was written first — all
-three agree, including under custom `widths`.
+**five** agree, including under custom `widths`.
 
 ```yaml
 model: !lazy:deltaid.TorchUNet     # no pretrained weights — the comparison, not the recommendation
@@ -199,8 +200,34 @@ well as the loss (the segmenter's own `ignore_index` is passed to both by defaul
 what *that* split measures on top, merged over the shared set by name. So an expensive per-class
 breakdown goes on validation alone without restating the shared pair beside it.
 
-> A metric whose value is not a single number is currently **dropped** from the reported scalars
-> rather than crashing the epoch. Rendering the per-class vector properly is on the backlog.
+A metric whose value is a `[C]` **vector** — what `average=None` produces — cannot go through
+Lightning's `log_dict` (its `convert_tensors_to_scalars` raises on anything that is not one
+number), so it is reported through the trackers' **text** channel instead: a table sorted
+worst-class-first, printed to the log and logged to every wired tracker.
+
+```yaml
+val_metrics:
+  iou_per_class: !lazy:torchmetrics.classification.MulticlassJaccardIndex
+    average: null
+
+class_names: [pet, background, boundary]   # rows are numbered without this
+plot_metrics: true                         # ALSO a bar chart (needs `marainer[plot]`)
+```
+
+```
+val/iou_per_class (mean 0.7509):
+
+| class      |   iou_per_class |
+|------------|-----------------|
+| boundary   |          0.4827 |
+| pet        |          0.8549 |
+| background |          0.9150 |
+```
+
+Worst-first because the scalar mean already says *how* the model is doing; what this adds is
+*which class it is worst at*. In the run above, mean IoU 0.751 hides that the boundary ring scores
+0.48 while both real classes are above 0.85 — and `class_names:` is what makes that sentence
+readable, since a mask carries ids and there is no label map to derive names from.
 
 ## Where results go
 
@@ -236,7 +263,7 @@ backend is a `!scope:framework=<name>` block overriding only the keys it must. A
 does not declare is an **error listing the ones it does** — not a silent fall-through to the
 default.
 
-Six backends are implemented:
+All eight backends are implemented:
 
 | backend | the loop | the model | what it brings |
 |---|---|---|---|
@@ -246,6 +273,8 @@ Six backends are implemented:
 | `keras` | `model.fit()` | `KerasUNet` | one API over torch / TensorFlow / JAX |
 | `tensorflow` | `tf.data` + `GradientTape` | `TensorFlowUNet` | XLA (`jit_compile`), a SavedModel export |
 | `huggingface` | `transformers.Trainer` | `HuggingFaceSegmentationModel` | fine-tuning a Hub checkpoint (SegFormer) |
+| `jax` | `nnx.jit` + optax | `FlaxUNet` | the loop as a pure function, traced once |
+| `mlx` | written out by hand | `MlxUNet` | Apple silicon, unified memory, lazy arrays |
 
 The first three run on torch, so they share the model, the losses, the metrics and the batch shape;
 what differs is only the loop. The last three each change something real, and every one of those
@@ -260,11 +289,18 @@ differences lives in the config where a reader can see it:
 - **HuggingFace swaps the model as well as the loop**, so its block wires its own — but it keeps
   the shared torch preprocess chain, since transformers *is* torch. It needs no `loss:` at all: an
   `AutoModelForSemanticSegmentation` computes its own from `labels=`.
+- **JAX and MLX are channels-last too**, and both resolve their loss, metrics and optimizer by
+  **NAME** rather than by `!class:` tag — optax and `mlx.nn.losses` ship plain *functions*, so
+  there is no class for a tag to resolve. That is why neither has a registrations module.
+  `mlx.optimizers` ships *classes* where optax ships *factories*, which is the one asymmetry
+  between the two.
 
-Because the zoos do not line up (smp is torch-only, and `keras.applications` has no segmentation
-models), the non-torch backends train **deltaid's own shared U-Net spec** — the same 488,739-parameter
-network in three vocabularies, so a cross-framework comparison compares frameworks rather than
-three different networks. See [the shared spec](#models--a-zoo-wrapper-and-a-shared-spec).
+Because the zoos do not line up (smp is torch-only, `keras.applications` has no segmentation
+models, `transformers` dropped Flax in v5, and `mlx-image` pins a `huggingface_hub` this workspace
+cannot take), the non-torch backends train **deltaid's own shared U-Net spec** — the same
+**488,739-parameter** network in five vocabularies, so a cross-framework comparison compares
+frameworks rather than five different networks. See
+[the shared spec](#models--a-zoo-wrapper-and-a-shared-spec).
 
 Verified end to end on the example's 256-row Oxford-Pets slice, five epochs, changing only the flag:
 
@@ -276,11 +312,11 @@ Verified end to end on the example's 256-row Oxford-Pets slice, five epochs, cha
 | `keras` | loss 0.719, mIoU 0.404 | loss 0.800, mIoU 0.365 |
 | `tensorflow` | loss 0.661, mIoU 0.459 | loss 1.043, mIoU 0.350 |
 | `huggingface` | loss 0.569 | loss 0.359, mIoU **0.659**, pixel acc 0.888 |
+| `jax` | loss 0.638 | loss 0.743, mIoU 0.452, pixel acc 0.713 |
+| `mlx` | loss 0.789 | loss 0.751, mIoU 0.351, pixel acc 0.673 |
 
-The Hub backend wins because it starts from real weights; the three U-Net backends start from
+The Hub backend wins because it starts from real weights; the five U-Net backends start from
 noise, and their agreement with each other is the point rather than their score.
-
-`jax` and `mlx` drop in beside them as `deltaid/<name>_segmenter.py` plus a row in `FRAMEWORKS`.
 
 ### Two engine facts that will otherwise cost you an afternoon
 

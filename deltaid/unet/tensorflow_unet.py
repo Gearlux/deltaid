@@ -51,12 +51,18 @@ def _glorot_uniform(shape: Tuple[int, ...], seed: int) -> Any:
     ``stateless_uniform`` rather than ``tf.random.uniform``: the seed is the whole argument for a
     reproducible model, and the stateful op reads a GLOBAL seed that another library can move.
 
-    The limit is Glorot's: ``sqrt(6 / (fan_in + fan_out))``, with the fans computed as every
-    framework computes them for a conv kernel ``[kh, kw, in, out]`` — receptive field times the
-    channel count on each side.
+    The limit is Glorot's: ``sqrt(6 / (fan_in + fan_out))``, with the fans computed exactly as
+    ``keras.src.initializers.random_initializers.compute_fans`` does — so the weights this
+    produces are drawn from the same distribution the other implementations' initializers use,
+    and "the same network" stays true of more than the parameter COUNT.
     """
-    receptive_field = int(shape[0]) * int(shape[1])
-    fan_in, fan_out = int(shape[-2]) * receptive_field, int(shape[-1]) * receptive_field
+    receptive_field = 1
+    for dim in shape[:-2]:
+        receptive_field *= int(dim)
+    if len(shape) == 2:  # a Dense kernel `(in, out)` — no receptive field at all
+        fan_in, fan_out = int(shape[0]), int(shape[1])
+    else:  # a conv kernel `(..., in, out)`
+        fan_in, fan_out = int(shape[-2]) * receptive_field, int(shape[-1]) * receptive_field
     limit = (6.0 / float(fan_in + fan_out)) ** 0.5
     return tf.random.stateless_uniform(shape, seed=(seed, 0), minval=-limit, maxval=limit, dtype=tf.float32)
 
