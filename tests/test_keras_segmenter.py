@@ -189,6 +189,28 @@ class TestWhatTheEngineChanges:
 
         assert seen == []
 
+    def test_keras_STILL_ships_no_phase_scoped_metric_hook(self) -> None:
+        """The REVISIT TRIGGER for the union above, not a restatement of it.
+
+        The union is the engine's answer rather than a shortcut: verified against Keras 3.15.1,
+        `compile` takes `metrics` and `weighted_metrics` and nothing phase-scoped
+        (`weighted_metrics` is about sample WEIGHTS), the set lives in one `CompileMetrics`
+        container, and `Model.metrics` is read-only. If a future Keras adds a public hook this
+        FAILS — which is the point: the backlog item was closed on this evidence, so the evidence
+        has to keep being checked.
+        """
+        import inspect
+
+        params = set(inspect.signature(keras.Model.compile).parameters)
+        assert "metrics" in params, "the check is against the real signature, so this is not vacuous"
+        assert not (params - {"self", "optimizer", "loss", "loss_weights", "metrics", "weighted_metrics"}) & {
+            "val_metrics",
+            "validation_metrics",
+            "eval_metrics",
+            "test_metrics",
+        }
+        assert type(_TinyNet()).metrics.fset is None, "the metric set is not swappable through public API"
+
     def test_an_explicitly_wired_loss_is_never_replaced(self) -> None:
         chosen = keras.losses.CategoricalFocalCrossentropy()
         seg = _segmenter(loss=chosen)

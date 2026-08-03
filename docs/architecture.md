@@ -323,14 +323,24 @@ case the absence is stated rather than emulated:
 | the batch layout | **channels-LAST** | **channels-LAST** | CHW (it is torch) |
 | what it alone brings | any Keras engine | XLA, a SavedModel | pretrained weights |
 
-- **`keras` can only UNION its four metric slots.** `keras.Model.compile` takes ONE list and
-  reports it on training and validation alike; there is no hook that narrows a metric to one split
-  short of recompiling between phases, which would discard the optimizer state a fit is using. So
-  a metric wired to `val_metrics` is computed on training too. Widening is the honest failure —
-  a metric appearing where it was not asked for is noise a reader ignores, where DROPPING it would
-  be a wired metric that silently reports nothing. `marainer.metric_slots` exists in two
-  functions for exactly this split: `merge_metric_specs` for an engine whose loop the caller owns,
-  `union_metric_specs` for one that cannot be told to narrow.
+- **`keras` can only UNION its four metric slots, and that is FINAL rather than pending.**
+  Verified against Keras **3.15.1**: `Model.compile` takes `metrics` and `weighted_metrics` and
+  nothing phase-scoped (`weighted_metrics` is about sample weights); the set lives in ONE
+  `CompileMetrics` container; and `Model.metrics` is a read-only property. So a metric wired to
+  `val_metrics` is computed on training too. Widening is the honest failure — a metric appearing
+  where it was not asked for is noise a reader ignores, where DROPPING it would be a wired metric
+  that silently reports nothing. `marainer.metric_slots` exists in two functions for exactly this
+  split: `merge_metric_specs` for an engine whose loop the caller owns, `union_metric_specs` for
+  one that cannot be told to narrow.
+
+  A **private** route does exist and is deliberately not taken: swapping `model._compile_metrics`
+  for a fresh `CompileMetrics` in a callback's `on_test_begin` / `on_test_end` narrows correctly
+  (measured — a val-only metric appears as `val_only_val` and not on training). It reaches into
+  `keras.src.trainers.compile_utils` and a private attribute for a gain that is cosmetic. The
+  workspace does knowingly use a private API elsewhere (the classification project's
+  `_trackable_children` for SavedModel restore), but there the alternative was BROKEN; here it is
+  merely noisier. **The supported way to narrow is `--framework tensorflow`** — the same Keras
+  losses and metrics over a loop that IS ours, which merges per split properly.
 - **`tensorflow` is a SIBLING of `keras`, not a subclass**, because it *narrows a precondition*:
   `_require_tensorflow_backend()` raises where a `KerasSegmenter` runs fine. A picker offering
   "any KerasSegmenter" would otherwise hand out something that cannot run. It earns its module by
@@ -469,3 +479,53 @@ def _glorot_uniform(shape, seed):
 **What you may change.** The initializer, if the spec's comparability is preserved — the parameter
 COUNT is what `spec.trainable_parameter_count` pins, not the distribution. What you may not do is
 reach back into `tf.initializers` for brevity.
+
+---
+
+## 10. Binary segmentation is `num_classes: 2` (2026-08-03)
+
+**Context.** The target contract is `[N, C, H, W]` logits against an int64 `[N, H, W]` class-id
+mask, which covers binary as `C = 2`. smp's losses also offer `mode="binary"`, which expects a
+single-channel `[N, 1, H, W]` prediction — so the question was whether that earns a branch here.
+
+**Decision.** It does not. There is ONE target contract; binary is `C = 2`, and the thing a binary
+setup actually buys is reached with a config knob instead.
+
+**Consequences.** The trap `mode="binary"` exists to avoid is real, and it is worth stating in
+numbers. On a mask with ~2% foreground, given a model that predicts **nothing but background**:
+
+| | value |
+|---|---|
+| `DiceLoss(mode="multiclass")` | **0.5052** — the background's perfect score halves it |
+| `MulticlassJaccardIndex(average="macro")` | **0.4897** — the same dilution |
+| `DiceLoss(mode="multiclass", classes=[1])` | **0.9999** |
+| `DiceLoss(mode="binary")` | 0.9899 |
+| `MulticlassJaccardIndex(average=None)` | `[0.9795, 0.0]` |
+
+So what `mode="binary"` buys is **not scoring the background** — and `classes=[1]`, smp's own knob,
+buys exactly that from the contract that already exists. The per-class vector names the failure
+outright, and since record 7's per-class report it renders worst-first, so the `0.0` is the first
+row a reader sees.
+
+A `[N, 1, H, W]` branch would have cost a second target shape (so `batch_tensor` and every
+backend's `_to_arrays` grow a case), a second loss family, a second metric family (`Binary*` rather
+than `Multiclass*`) and a second prediction contract — eight backends wide — to reach a number the
+one contract already reaches.
+
+**Example.**
+
+```yaml
+num_classes: 2
+
+loss_fn: !class:DiceLoss@framework=torch
+  mode: multiclass
+  classes: [1]              # the background is not averaged in
+
+val_metrics:
+  iou_per_class: !lazy:torchmetrics.classification.MulticlassJaccardIndex
+    average: null
+```
+
+**What you may change.** Nothing about the shape. If a future task genuinely needs single-channel
+outputs — a regression head, a distance transform — that is a different target TYPE and belongs in
+the record model upstream, not in a `mode:` knob on the segmenter.
