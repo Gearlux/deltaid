@@ -51,6 +51,7 @@ import numpy as np
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
 from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
@@ -179,6 +180,10 @@ class MlxSegmenter(ProgressReporting):
             ``train_metrics``: the training pass computes the loss and nothing else.
         class_names: Labels for the per-class metric report; indices otherwise.
         plot_metrics: ALSO send each per-class metric to the trackers as a matplotlib bar chart.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. This loop already writes the canonical
+            ``<split>/<name>``, so the default translates nothing; wiring ``target:`` is what
+            makes it record in another engine's spelling.
 
     Post-construction slots (YAML / broadcasting): ``predictions_sink``, ``metrics_sidecar_path``.
     """
@@ -208,6 +213,7 @@ class MlxSegmenter(ProgressReporting):
         test_metrics: Optional[Sequence[MlxMetric]] = None,
         class_names: Optional[List[str]] = None,
         plot_metrics: bool = False,
+        metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
         super().__init__()
         # `nn.Module`, not `Lazy[nn.Module]`: the deferred-ness is declared once, on the ctor
@@ -241,6 +247,9 @@ class MlxSegmenter(ProgressReporting):
         # Stored VERBATIM (lazy-init): entries may be deferred markers, flowed where used.
         self.callbacks: Optional[List[Lazy[EpochCallback]]] = callbacks
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
         self._history: Dict[str, List[float]] = {}
@@ -409,15 +418,20 @@ class MlxSegmenter(ProgressReporting):
             return {"loss": float("nan")}
         return {"loss": total / batches, **{k: v / batches for k, v in sums.items()}}
 
-    def _report(self, logs: Dict[str, Any], prefix: str = "", step: Optional[int] = None) -> Dict[str, float]:
+    def _report(self, logs: Dict[str, Any], split: str = "train", step: Optional[int] = None) -> Dict[str, float]:
         """Split one epoch's values into the SCALARS a tracker takes and the vectors it does not.
+
+        The names are canonical (``<split>/<name>``) from here rather than translated later: this
+        loop is ours, so there is no engine convention to preserve — and the same prefix has to
+        reach the per-class TEXT channel below, where a `val_iou_per_class` beside another
+        backend's `val/iou_per_class` would be two names for one thing.
 
         The same split every other backend makes: ``log_metrics`` is a ``{name: float}`` channel,
         so a ``[C]`` per-class IoU goes out through ``log_text`` (and ``log_figure`` when
         ``plot_metrics`` asks) rather than being dropped. Which values are vectors is matrainer's
         rule, by SHAPE.
         """
-        named = {f"{prefix}{k}": v for k, v in logs.items()}
+        named = {f"{split}/{k}": v for k, v in logs.items()}
         scalars = {k: float(v) for k, v in named.items() if np.asarray(v).ndim == 0}
         trackers = self._live_trackers()
         for payload in per_class_vectors(named, self.class_names or None):
@@ -443,6 +457,7 @@ class MlxSegmenter(ProgressReporting):
         # Provenance through matrainer's plain FUNCTIONS — `runnable=self` so the hyperparameters
         # and the resolved config come from matrainer's ONE derivation.
         trackers = self._live_trackers()
+        names = as_metric_names(self.metric_names)
         manifest = log_run_context(trackers, runnable=self)
         network = self.model
         optimizer = _as_optimizer(self.optimizer, self.learning_rate)
@@ -464,23 +479,23 @@ class MlxSegmenter(ProgressReporting):
                 mx.eval(network.parameters(), optimizer.state, loss)
                 total += float(loss)
                 batches += 1
-            scalars = {"loss": total / batches if batches else float("nan")}
+            scalars = {"train/loss": total / batches if batches else float("nan")}
             if val_seq is not None:
-                scalars.update(self._report(self._evaluate(val_seq), prefix="val_", step=epoch))
+                scalars.update(self._report(self._evaluate(val_seq), split="val", step=epoch))
             # A `fit()` would have done this; a hand-written loop must. Forgetting it is
             # INVISIBLE — training silently runs on one fixed row order forever.
             train_seq.on_epoch_end()
             for callback in self.callbacks or []:
                 flow(callback)(epoch, scalars)
             for tracker in trackers:
-                tracker.log_metrics(scalars, step=epoch)
+                tracker.log_metrics(names(scalars), step=epoch)
             for key, value in scalars.items():
                 self._history.setdefault(key, []).append(value)
             logger.info(
                 f"epoch {epoch + 1}/{self.max_epochs}: " + ", ".join(f"{k}={v:.4f}" for k, v in scalars.items())
             )
 
-        self._computed_metrics = scalars
+        self._computed_metrics = names(scalars)
         logger.info("Training complete.")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
         # Uploads the log file AND stamps the manifest's terminal status. Not optional once a
@@ -497,7 +512,7 @@ class MlxSegmenter(ProgressReporting):
         if self.test_set is None:
             raise ValueError("MlxSegmenter.test() requires a 'test_set'.")
         values = self._evaluate(self._sequence(self.test_set), split="test")
-        self._computed_metrics = self._report(values, prefix="test_")
+        self._computed_metrics = as_metric_names(self.metric_names)(self._report(values, split="test"))
         for tracker in self._live_trackers():
             tracker.log_metrics(self._computed_metrics)
         logger.info(f"Evaluation complete: {self._computed_metrics}")

@@ -40,6 +40,7 @@ from matrainer.lightning import (
     build_metric_collection,
     scalar_metrics,
 )
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
@@ -129,6 +130,11 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         plot_metrics: ALSO send each per-class metric to the trackers as a matplotlib bar chart,
             not only as a table. Off by default: it makes matplotlib (``matrainer[plot]``) a cost
             of every eval epoch, where the table costs nothing.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. The ``self.log`` calls already write
+            the canonical ``<split>/<name>``, so the default translates nothing; it is handed to
+            each ``TrackerLogger``, where a wired ``target:`` records the same run in another
+            engine's spelling.
 
     Post-construction slots (YAML / broadcasting): ``val_set``, ``optimizer``,
     ``train/val/test_loader``, ``lightning``, ``loss_fn``, ``predictions_sink``,
@@ -157,6 +163,7 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         test_metrics: MetricsSpec = None,
         class_names: Optional[List[str]] = None,
         plot_metrics: bool = False,
+        metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
         super().__init__()
         self.model: Lazy[nn.Module] = model
@@ -214,6 +221,9 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         # tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes and flows it
         # at run time.
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self.log_system_metrics: bool = True
         self.class_names: Optional[List[str]] = list(class_names) if class_names else None
         self.plot_metrics = plot_metrics
@@ -250,7 +260,14 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         y = self._targets(batch)
         preds = self(x)
         loss: torch.Tensor = cast(nn.Module, self.loss_fn)(preds, y)
-        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
+        # TWO calls, one series each, and that is what keeps the name canonical: Lightning
+        # appends `_step` / `_epoch` when ONE name carries both, so a single
+        # `on_step=True, on_epoch=True` call recorded `train/loss_epoch` — a name no other
+        # backend writes, in the column a cross-engine comparison uses. The per-step series is
+        # still worth having (nothing else shows the loss moving WITHIN an epoch) and keeps the
+        # progress bar's live number, so it gets its own explicit name instead.
+        self.log("train/loss", loss, on_step=False, on_epoch=True, batch_size=x.shape[0])
+        self.log("train/loss_step", loss, on_step=True, on_epoch=False, prog_bar=True, batch_size=x.shape[0])
         if isinstance(self.train_metrics, MetricCollection):
             # The per-BATCH values, SCALARS only — `log_dict` reduces every logged value through
             # Lightning's `convert_tensors_to_scalars`, which raises on a non-scalar metric.
@@ -439,7 +456,8 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         slot — one wiring, one place a run's output goes.
         """
         trackers = self._live_trackers()
-        adapters = [TrackerLogger(t) for t in trackers]
+        names = as_metric_names(self.metric_names)
+        adapters = [TrackerLogger(t, metric_names=names) for t in trackers]
         # A runtime kwarg wins over the stored one, so an explicitly wired `lightning:` block keeps
         # every knob it set and only gains the loggers.
         trainer = cast(L.Trainer, flow(self.lightning, logger=adapters or False))
@@ -557,7 +575,11 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
             # The segmentation pair: mean IoU (the field's primary score) and macro Dice — the
             # same statistic as macro F1, which is what torchmetrics calls it.
             self.metrics = {
-                "miou": LazyClass[Metric](MulticlassJaccardIndex, average="macro", ignore_index=self.ignore_index),
+                # `mean_iou`, not `miou`: the JAX / MLX / HuggingFace backends name their
+                # metrics from their own function registry and cannot say `miou`, so a
+                # different word here would put one quantity in two columns of the same
+                # cross-backend comparison.
+                "mean_iou": LazyClass[Metric](MulticlassJaccardIndex, average="macro", ignore_index=self.ignore_index),
                 "dice_macro": LazyClass[Metric](
                     MulticlassF1Score, average="macro", ignore_index=self.ignore_index, multidim_average="global"
                 ),

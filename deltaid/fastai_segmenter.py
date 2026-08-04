@@ -60,6 +60,7 @@ from fastai.learner import Learner
 from fastai.losses import CrossEntropyLossFlat
 from loggair import get_logger
 from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
@@ -121,6 +122,11 @@ class FastaiSegmenter(TorchRunner, ProgressReporting):
         val_metrics / test_metrics: That split's OWN metrics, merged over ``metrics``. There is
             no ``train_metrics``: a fastai ``Learner`` computes its metrics on the validation
             pass only, so the slot would accept a set and silently never call it.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. The ``Recorder``'s columns are
+            ``train_loss`` / ``valid_loss`` / the metrics; the default translates them to the
+            canonical ``train/loss`` / ``val/loss`` / ``val/<metric>``, an unprefixed column
+            landing under ``val`` because that is the split a ``Learner`` measures.
         callbacks: fastai callbacks.
         trackers: matrainer trackers — one or a list.
         experiment_name / run_name: tracking identity.
@@ -149,6 +155,7 @@ class FastaiSegmenter(TorchRunner, ProgressReporting):
         metrics: Optional[List[FastaiMetric]] = None,
         val_metrics: Optional[List[FastaiMetric]] = None,
         test_metrics: Optional[List[FastaiMetric]] = None,
+        metric_names: Optional[Lazy[MetricNames]] = None,
         callbacks: Optional[List[Lazy[FastaiCallback]]] = None,
         trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
         experiment_name: str = "deltaid_segmentation",
@@ -180,6 +187,9 @@ class FastaiSegmenter(TorchRunner, ProgressReporting):
         # Stored VERBATIM (lazy-init): entries may be deferred `Fluid` markers, flowed where used.
         self.callbacks: Optional[List[Lazy[FastaiCallback]]] = callbacks
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         # The loaders are the Lightning backend's construction, not a private one — same names,
         # same deferral, same overridability, so ONE config idiom drives both backends. The
         # divergence is exactly ONE kwarg: `collate_fn=self._to_tuple` where Lightning bakes
@@ -415,8 +425,9 @@ class FastaiSegmenter(TorchRunner, ProgressReporting):
             learner.fit_one_cycle(self.max_epochs, lr_max=self.learning_rate)
         else:
             learner.fit(self.max_epochs, lr=self.learning_rate)
-        self._computed_metrics = _recorded_metrics(learner)
-        _log_recorded_epochs(learner, trackers)
+        names = as_metric_names(self.metric_names)
+        self._computed_metrics = _recorded_metrics(learner, names)
+        _log_recorded_epochs(learner, trackers, names)
         logger.info(f"Training complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
         # Uploads the log file, stamps the manifest's terminal status AND finalizes every tracker.
@@ -433,7 +444,9 @@ class FastaiSegmenter(TorchRunner, ProgressReporting):
         loader = flow(self.test_loader, dataset=self._prepare(self.test_set))
         learner = self._build_learner(DataLoaders(loader, loader), "test")
         values = learner.validate()
-        self._computed_metrics = _named_values(learner, values)
+        # `validate()` fills the VALIDATION columns whichever split it walked, so the row is read
+        # as fastai spells it and lands under `val/` — the same names a fit's last epoch reports.
+        self._computed_metrics = _named_values(learner, values, as_metric_names(self.metric_names))
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
 
@@ -545,26 +558,32 @@ def _metric_names(learner: Learner) -> List[str]:
     return [n for n in names if n not in ("epoch", "time")]
 
 
-def _named_values(learner: Learner, values: Sequence[Any]) -> Dict[str, float]:
+def _named_values(learner: Learner, values: Sequence[Any], names: MetricNames) -> Dict[str, float]:
     """Pair a Recorder row with its column names, tolerating a shorter row.
 
     ``Learner.validate`` returns one fewer value than a training epoch does (there is no
-    ``train_loss``), so the names are matched from the END — where ``valid_loss`` and the metrics
-    line up — rather than from the front.
+    ``train_loss``), so the columns are matched from the END — where ``valid_loss`` and the
+    metrics line up — rather than from the front.
+
+    The row is then translated out of fastai's vocabulary (``names``), which is what makes this
+    run's record comparable with another engine's. Two things only a fastai reader knows and the
+    translation encodes: ``valid_loss`` is the validation loss, and an UNPREFIXED column is a
+    VALIDATION metric — the Recorder computes its metrics on the validation pass and prefixes
+    none of them, where every other engine's bare key is a training one.
     """
-    names = _metric_names(learner)
-    if len(names) > len(values):
-        names = names[len(names) - len(values) :]
-    return {name: float(value) for name, value in zip(names, values)}
+    columns = _metric_names(learner)
+    if len(columns) > len(values):
+        columns = columns[len(columns) - len(values) :]
+    return names({name: float(value) for name, value in zip(columns, values)}, source="fastai")
 
 
-def _recorded_metrics(learner: Learner) -> Dict[str, float]:
+def _recorded_metrics(learner: Learner, names: MetricNames) -> Dict[str, float]:
     """The last epoch's metrics as ``{name: value}``, or ``{}`` if nothing was recorded."""
     values = list(getattr(learner.recorder, "values", []) or [])
-    return _named_values(learner, values[-1]) if values else {}
+    return _named_values(learner, values[-1], names) if values else {}
 
 
-def _log_recorded_epochs(learner: Learner, trackers: Sequence[Tracker]) -> None:
+def _log_recorded_epochs(learner: Learner, trackers: Sequence[Tracker], names: MetricNames) -> None:
     """Forward EVERY recorded epoch to the trackers, not just the final one.
 
     ``Learner.fit`` reports per epoch through its ``Recorder`` and nothing else sees those rows,
@@ -574,6 +593,6 @@ def _log_recorded_epochs(learner: Learner, trackers: Sequence[Tracker]) -> None:
     if not trackers:
         return
     for epoch, row in enumerate(list(getattr(learner.recorder, "values", []) or [])):
-        metrics = _named_values(learner, row)
+        metrics = _named_values(learner, row, names)
         for tracker in trackers:
             tracker.log_metrics(metrics, step=epoch)

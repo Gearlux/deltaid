@@ -49,6 +49,7 @@ import torch.nn as nn
 from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
 from loggair import get_logger
 from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.torch import Device, build_metric_collection, resolve_device, scalar_metrics
@@ -123,6 +124,10 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
         trackers: matrainer trackers — one or a list.
         class_names: Labels for the per-class metric report, in class-id order; indices otherwise.
         plot_metrics: ALSO send each per-class metric to the trackers as a matplotlib bar chart.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. This loop already writes the canonical
+            ``<split>/<name>``, so the default translates nothing; wiring ``target:`` is what
+            makes it record in another engine's spelling.
 
     Post-construction slots (YAML / broadcasting): ``val_set``, ``optimizer``,
     ``train/val/test_loader``, ``loss_fn``, ``predictions_sink``, ``metrics_sidecar_path``.
@@ -153,6 +158,7 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
         trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
         class_names: Optional[List[str]] = None,
         plot_metrics: bool = False,
+        metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
         super().__init__()
         # `nn.Module`, not `Lazy[nn.Module]`: the DEFERRED-ness is declared once, on the ctor
@@ -202,6 +208,9 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
         self.metrics_sidecar_path: Optional[str] = None
         # Stored VERBATIM (lazy-init mandate: the constructor does no work).
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self.class_names: Optional[List[str]] = list(class_names) if class_names else None
         self.plot_metrics = plot_metrics
         self._history: Dict[str, List[float]] = {}
@@ -337,7 +346,11 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
             logger.debug(f"loss_fn defaulted to CrossEntropyLoss(ignore_index={self.ignore_index}).")
         if self.metrics is None and self.num_classes:
             self.metrics = {
-                "miou": LazyClass[Metric](MulticlassJaccardIndex, average="macro", ignore_index=self.ignore_index),
+                # `mean_iou`, not `miou`: the JAX / MLX / HuggingFace backends name their
+                # metrics from their own function registry and cannot say `miou`, so a
+                # different word here would put one quantity in two columns of the same
+                # cross-backend comparison.
+                "mean_iou": LazyClass[Metric](MulticlassJaccardIndex, average="macro", ignore_index=self.ignore_index),
                 "dice_macro": LazyClass[Metric](
                     MulticlassF1Score, average="macro", ignore_index=self.ignore_index, multidim_average="global"
                 ),
@@ -472,6 +485,7 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
             if loaders["val"] is not None:
                 logs["val/loss"] = self._eval_epoch(cast(DataLoader[Any], loaders["val"]), self.val_metrics)
                 logs.update(self._epoch_metrics(self.val_metrics, step=epoch))
+            logs = as_metric_names(self.metric_names)(logs)
             for tracker in trackers:
                 tracker.log_metrics(logs, step=epoch)
             for key, value in logs.items():
@@ -515,6 +529,7 @@ class TorchSegmenter(TorchRunner, ProgressReporting):
         collection = metrics if metrics is not None else self.test_metrics
         results = {f"{split}/loss": self._eval_epoch(loader, collection)}
         results.update(self._epoch_metrics(collection))
+        results = as_metric_names(self.metric_names)(results)
         for tracker in trackers:
             tracker.log_metrics(results)
         logger.info(f"Evaluation complete: {results}")

@@ -264,7 +264,7 @@ keras: !scope:framework=keras
   #     - !class:keras.metrics.MeanIoU
   #       num_classes: 3
   #       sparse_y_pred: false      # raw logits, not an argmax — without it, a shape error
-  #       name: miou
+  #       name: mean_iou
   #
   # Keras compiles ONE metric list for the whole run, so this engine computes the
   # UNION of `metrics` / `train_metrics` / `val_metrics` / `test_metrics` and

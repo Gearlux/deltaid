@@ -529,3 +529,66 @@ val_metrics:
 **What you may change.** Nothing about the shape. If a future task genuinely needs single-channel
 outputs — a regression head, a distance transform — that is a different target TYPE and belongs in
 the record model upstream, not in a `mode:` knob on the segmenter.
+
+---
+
+## 11. One name per quantity, on all eight backends (2026-08-04)
+
+**Context.** A `Tracker` records the key it is handed, verbatim — every backend of matrainer's
+does. So the names in a tracker are whatever the training engine called them, and the eight
+engines here call the same quantities eight ways: `loss` / `val_loss` (keras, jax, mlx),
+`train_loss` / `valid_loss` plus **unprefixed validation** metrics (fastai), `train_*` / `eval_*`
+(a `transformers.Trainer`), `train/loss` / `val/loss` (lightning, torch), and — because Lightning
+appends a suffix when one name carries both a step and an epoch series — `train/loss_epoch`.
+
+Two runs of the same config on two backends therefore could not be read side by side, which is
+the one thing this project exists to make possible. The per-class tables had the same split:
+`val_iou_per_class` from the JAX loop, `val/iou_per_class` from the torch one, for the same
+computation.
+
+**Decision.** Each backend translates out of its engine's vocabulary at the boundary — on the way
+to a tracker and to the metrics sidecar — through `matrainer.MetricNames`
+(matrainer's `docs/architecture.md` record 6), declaring its own `source`. The canonical target is
+`<split>/<name>`, `split ∈ {train, val, test}`.
+
+The translation lives in matrainer rather than here for the `metric_slots` reason one layer up:
+the classification project needs the identical table on the identical eight engines, and a copy
+in each would drift. What stays here is WHEN each backend applies it and WHICH split it is
+reporting — the two things only the backend can know.
+
+**Consequences.**
+
+- Every backend records `train/loss`, `val/loss` and `val/<metric>`; the per-class text and figure
+  channels carry the same prefix, so `val/iou_per_class` means one thing across the fleet.
+- `LightningSegmenter.training_step` logs the loss twice, under `train/loss` (`on_epoch`) and
+  `train/loss_step` (`on_step`, `prog_bar`). The per-step series is kept — nothing else shows the
+  loss moving within an epoch — and it is what the progress bar displays.
+- The JAX and MLX `_report()` takes a `split` rather than a free-text `prefix`, because the same
+  value reaches the per-class TEXT channel: a prefix that is not a split would rename a table
+  nobody else renames.
+- `HuggingFaceSegmenter.test()` passes `metric_key_prefix="test"`. Left at HF's `eval` default the
+  held-out scores would be translated into the columns a validation pass fills.
+- The Keras and TensorFlow backends translate `_computed_metrics` and leave `_history` alone: the
+  history is Keras' own object, and a wired `EarlyStopping(monitor="val_loss")` must keep finding
+  the name Keras gave it.
+- Every backend gained a `metric_names:` constructor slot, so one top-level key reaches all eight —
+  including `target:`, which records the whole fleet in another engine's spelling.
+
+**Example.**
+
+```yaml
+metric_names: !class:matrainer.MetricNames     # optional; the default is <split>/<name>
+  target: keras
+  renames: {jaccard_coeff_multi: iou}
+```
+
+```python
+# what each backend hands the trackers, after translation
+{"train/loss": 0.79, "val/loss": 0.75, "val/mean_iou": 0.35}
+```
+
+**What you may change.** A ninth backend declares the slot and calls
+`as_metric_names(self.metric_names)` where it reports — pinned by
+`tests/test_tracking_parity.py`. Do NOT translate a name the user wrote in a config, and do not
+push the translation into `Tracker.log_metrics`: a tracker cannot know which engine or which
+split produced a bare key.

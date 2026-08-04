@@ -138,15 +138,15 @@ class TestParityWithTheLightningBackend:
     def test_the_metric_defaults_match(self) -> None:
         seg = _segmenter()
         seg.initialize()
-        assert set(seg.val_metrics.keys()) == {"val/miou", "val/dice_macro"}
+        assert set(seg.val_metrics.keys()) == {"val/mean_iou", "val/dice_macro"}
 
     def test_a_split_slot_adds_to_the_shared_set_for_that_split_only(self) -> None:
         from torchmetrics.classification import MulticlassAccuracy
 
         seg = _segmenter(val_metrics={"accuracy": LazyClass(MulticlassAccuracy)})
         seg.initialize()
-        assert set(seg.val_metrics.keys()) == {"val/miou", "val/dice_macro", "val/accuracy"}
-        assert set(seg.train_metrics.keys()) == {"train/miou", "train/dice_macro"}
+        assert set(seg.val_metrics.keys()) == {"val/mean_iou", "val/dice_macro", "val/accuracy"}
+        assert set(seg.train_metrics.keys()) == {"train/mean_iou", "train/dice_macro"}
 
     def test_it_uses_the_shared_combination_rule(self) -> None:
         """One rule across every backend AND both tasks — never re-derived per backend."""
@@ -214,7 +214,7 @@ class TestTheLoop:
         seg = _segmenter(train_set=_records(8), model=LazyClass(_TinyNet))
         seg.val_set = _records(4)
         seg.run()
-        assert {"train/loss", "train/miou", "val/loss", "val/miou"} <= set(seg.computed_metrics)
+        assert {"train/loss", "train/mean_iou", "val/loss", "val/mean_iou"} <= set(seg.computed_metrics)
 
     def test_the_loss_actually_descends(self) -> None:
         """A finite loss is not evidence of training — a badly wired one stays finite too.
@@ -258,14 +258,14 @@ class TestTheLoop:
         seg.metrics_sidecar_path = str(tmp_path / "metrics.json")
         seg.run()
         payload = json.loads((tmp_path / "metrics.json").read_text())
-        assert "test/miou" in payload["metrics"]
+        assert "test/mean_iou" in payload["metrics"]
 
     def test_evaluate_scores_the_validation_split(self) -> None:
         """`evaluate` and `test` differ in the SPLIT, which is the only thing that differs."""
         seg = _segmenter(task="evaluate", model=_TinyNet())
         seg.val_set = _records(4)
         seg.run()
-        assert "val/miou" in seg.computed_metrics
+        assert "val/mean_iou" in seg.computed_metrics
 
     def test_predict_streams_every_record_to_the_sink_and_closes_it(self) -> None:
         written: List[Any] = []

@@ -271,14 +271,14 @@ class TestTheLoop:
     def test_fit_trains_and_reports_both_splits(self) -> None:
         seg = _segmenter(train_set=_records(8), val_set=_records(4))
         seg.run()
-        assert {"loss", "val_loss", "val_mean_iou", "val_pixel_accuracy"} <= set(seg.computed_metrics)
+        assert {"train/loss", "val/loss", "val/mean_iou", "val/pixel_accuracy"} <= set(seg.computed_metrics)
 
     def test_the_loss_actually_descends(self) -> None:
         """A finite loss is not evidence of training. Learnable data on purpose: over random masks
         the loss would sit at ln(C) however well the run was wired."""
         seg = _segmenter(train_set=_records(8, learnable=True), max_epochs=6)
         seg.run()
-        losses = seg.history["loss"]
+        losses = seg.history["train/loss"]
         assert len(losses) == 6
         assert losses[-1] < losses[0], f"loss did not descend: {losses[0]:.4f} -> {losses[-1]:.4f}"
 
@@ -320,21 +320,21 @@ class TestTheLoop:
         )
         seg.run()
 
-        assert [name for name, _ in tracker.texts] == ["val_iou_per_class"]
+        assert [name for name, _ in tracker.texts] == ["val/iou_per_class"]
         assert "boundary" in tracker.texts[0][1]
         assert all(isinstance(v, float) for values in tracker.metrics for v in values.values())
-        assert "val_iou_per_class" not in seg.computed_metrics, "a vector must not reach the scalars"
+        assert "val/iou_per_class" not in seg.computed_metrics, "a vector must not reach the scalars"
 
     def test_test_writes_a_metrics_sidecar(self, tmp_path: Path) -> None:
         seg = _segmenter(task="test", test_set=_records(4))
         seg.metrics_sidecar_path = str(tmp_path / "metrics.json")
         seg.run()
-        assert "test_mean_iou" in json.loads((tmp_path / "metrics.json").read_text())["metrics"]
+        assert "test/mean_iou" in json.loads((tmp_path / "metrics.json").read_text())["metrics"]
 
     def test_evaluate_and_test_are_the_same_class(self) -> None:
         seg = _segmenter(task="evaluate", test_set=_records(4))
         seg.run()
-        assert "test_mean_iou" in seg.computed_metrics
+        assert "test/mean_iou" in seg.computed_metrics
 
     def test_predict_streams_every_record_to_the_sink_and_closes_it(self) -> None:
         written: List[Any] = []

@@ -142,14 +142,14 @@ class TestSentinelDefaults:
     def test_the_metric_default_is_the_segmentation_pair(self) -> None:
         seg = _segmenter()
         seg.initialize()
-        assert set(seg.val_metrics.keys()) == {"val/miou", "val/dice_macro"}
+        assert set(seg.val_metrics.keys()) == {"val/mean_iou", "val/dice_macro"}
 
     def test_the_default_metrics_honour_the_ignore_index(self) -> None:
         """The same knob must drop the void class from the SCORE as well as the loss —
         otherwise the model is graded on pixels it was told to ignore."""
         seg = _segmenter(ignore_index=250)
         seg.initialize()
-        assert seg.val_metrics["val/miou"].ignore_index == 250
+        assert seg.val_metrics["val/mean_iou"].ignore_index == 250
 
     def test_resolution_is_idempotent_so_a_direct_step_call_works(self) -> None:
         """`training_step` resolves the sentinels itself, so a test or a custom loop can call it
@@ -170,8 +170,8 @@ class TestPerSplitMetrics:
 
         seg = _segmenter(val_metrics={"accuracy": LazyClass(MulticlassAccuracy)})
         seg.initialize()
-        assert set(seg.val_metrics.keys()) == {"val/miou", "val/dice_macro", "val/accuracy"}
-        assert set(seg.train_metrics.keys()) == {"train/miou", "train/dice_macro"}
+        assert set(seg.val_metrics.keys()) == {"val/mean_iou", "val/dice_macro", "val/accuracy"}
+        assert set(seg.train_metrics.keys()) == {"train/mean_iou", "train/dice_macro"}
 
     def test_all_four_slots_are_declared_constructor_params(self) -> None:
         """A post-construction-only slot is invisible to `to_pydantic`, so navigaitor's form-spec
@@ -228,6 +228,40 @@ class TestTrackers:
         import inspect
 
         assert "logger" not in inspect.signature(LightningSegmenter.__init__).parameters
+
+    def test_a_metric_names_key_broadcasts_from_a_flat_config(self) -> None:
+        """The naming knob has to be reachable the way every other one is — a top-level key.
+
+        Wired in a CONSTRUCTOR slot it arrives as a deferred marker (only `!class:X()` builds
+        eagerly), which is why the slot stores it verbatim and `as_metric_names` flows it at use.
+        """
+        from confluid import flow, load
+        from confluid.fluid import Fluid
+        from matrainer.metric_names import as_metric_names
+
+        yaml = """
+runnable: !class:deltaid.LightningSegmenter
+  run_name: x
+model: "MODEL_SENTINEL"
+metric_names: !class:matrainer.MetricNames
+  target: keras
+"""
+        seg = load(yaml)["runnable"]
+        seg = flow(seg) if isinstance(seg, Fluid) else seg
+
+        assert seg.metric_names is not None, "a `metric_names:` key did not reach the slot"
+        assert as_metric_names(seg.metric_names).target == "keras"
+
+    def test_the_naming_knob_reaches_the_adapters(self) -> None:
+        """One key, and every tracker this run writes to records that vocabulary."""
+        from matrainer import CsvTracker, MetricNames
+        from matrainer.lightning import TrackerLogger
+
+        names = MetricNames(target="keras")
+        seg = _segmenter(trackers=[CsvTracker(save_dir="./_deltaid_test_logs")], metric_names=names)
+
+        adapters = [lg for lg in seg._build_trainer().loggers if isinstance(lg, TrackerLogger)]
+        assert adapters and adapters[0].metric_names is names
 
     def test_no_local_hyperparameter_derivation_survives(self) -> None:
         """matrainer owns the ONE derivation (`runnable=self`), so two backends cannot answer
@@ -351,8 +385,8 @@ class TestEndToEnd:
 
         assert seg.num_classes == NUM_CLASSES
         computed = seg.computed_metrics
-        assert "val/miou" in computed and "val/loss" in computed
-        assert 0.0 <= computed["val/miou"] <= 1.0
+        assert "val/mean_iou" in computed and "val/loss" in computed
+        assert 0.0 <= computed["val/mean_iou"] <= 1.0
         assert isinstance(seg.trained_model, nn.Module)
 
     def test_the_loss_actually_descends(self) -> None:
@@ -372,7 +406,9 @@ class TestEndToEnd:
 
         class _Recorder(pl.Callback):
             def on_train_epoch_end(self, trainer: Any, module: Any) -> None:
-                losses.append(float(trainer.callback_metrics["train/loss_epoch"]))
+                # `train/loss`, not `train/loss_epoch`: the step and epoch series are logged
+                # under names of their own so the canonical one is the plain quantity.
+                losses.append(float(trainer.callback_metrics["train/loss"]))
 
         seg = _segmenter(train_set=learnable, model=LazyClass(_TinyNet))
         cast(Any, seg.lightning).kwargs.update(max_epochs=12, callbacks=[_Recorder()])
@@ -391,7 +427,7 @@ class TestEndToEnd:
 
         payload = json.loads((tmp_path / "metrics.json").read_text())
         assert payload["experiment_name"] == "deltaid_segmentation"
-        assert "test/miou" in payload["metrics"]
+        assert "test/mean_iou" in payload["metrics"]
 
     def test_predict_streams_every_record_to_the_sink_and_closes_it(self) -> None:
         written: List[Any] = []
@@ -417,7 +453,7 @@ class TestEndToEnd:
         seg = _segmenter(task="evaluate", model=_TinyNet())
         seg.val_set = _records(4)
         seg.run()
-        assert "val/miou" in seg.computed_metrics
+        assert "val/mean_iou" in seg.computed_metrics
 
 
 # --------------------------------------------------------------------------- #
@@ -464,7 +500,7 @@ class TestThePerClassReport:
         seg.val_metrics.update(torch.randn(2, NUM_CLASSES, SIDE, SIDE), _target_masks(2))
         seg._report_epoch_metrics(seg.val_metrics)
 
-        assert logged and set(logged[0]) == {"val/miou", "val/dice_macro"}
+        assert logged and set(logged[0]) == {"val/mean_iou", "val/dice_macro"}
         assert all(isinstance(v, float) for v in logged[0].values()), "a vector reached log_dict"
 
     def test_the_vector_reaches_every_trackers_text_channel(self) -> None:

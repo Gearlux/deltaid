@@ -49,6 +49,7 @@ from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from flax import nnx
 from loggair import get_logger
 from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
@@ -195,6 +196,10 @@ class JaxSegmenter(ProgressReporting):
             ``train_metrics``: the training pass computes the loss and nothing else.
         class_names: Labels for the per-class metric report; indices otherwise.
         plot_metrics: ALSO send each per-class metric to the trackers as a matplotlib bar chart.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. This loop already writes the canonical
+            ``<split>/<name>``, so the default translates nothing; wiring ``target:`` is what
+            makes it record in another engine's spelling.
         jit: Trace the step functions with ``nnx.jit``. On by default — that IS the JAX story.
             Turn it off to read a Python traceback from inside a step.
 
@@ -226,6 +231,7 @@ class JaxSegmenter(ProgressReporting):
         test_metrics: Optional[Sequence[JaxMetric]] = None,
         class_names: Optional[List[str]] = None,
         plot_metrics: bool = False,
+        metric_names: Optional[Lazy[MetricNames]] = None,
         jit: bool = True,
     ) -> None:
         super().__init__()
@@ -265,6 +271,9 @@ class JaxSegmenter(ProgressReporting):
         # Stored VERBATIM (lazy-init): entries may be deferred markers, flowed where used.
         self.callbacks: Optional[List[Lazy[EpochCallback]]] = callbacks
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
         self._history: Dict[str, List[float]] = {}
@@ -456,15 +465,20 @@ class JaxSegmenter(ProgressReporting):
             return {"loss": float("nan")}
         return {"loss": total / batches, **{k: np.asarray(v) / batches for k, v in sums.items()}}
 
-    def _report(self, logs: Dict[str, Any], prefix: str = "", step: Optional[int] = None) -> Dict[str, float]:
+    def _report(self, logs: Dict[str, Any], split: str = "train", step: Optional[int] = None) -> Dict[str, float]:
         """Split one epoch's values into the SCALARS a tracker takes and the vectors it does not.
+
+        The names are canonical (``<split>/<name>``) from here rather than translated later: this
+        loop is ours, so there is no engine convention to preserve — and the same prefix has to
+        reach the per-class TEXT channel below, where a `val_iou_per_class` beside another
+        backend's `val/iou_per_class` would be two names for one thing.
 
         The same split every other backend makes, and for the same reason: ``log_metrics`` is a
         ``{name: float}`` channel, so a ``[C]`` per-class IoU has to go out through ``log_text``
         (and ``log_figure`` when ``plot_metrics`` asks) or be dropped. Which values are vectors is
         matrainer's rule, by SHAPE — see :func:`~matrainer.tracking.render.per_class_vectors`.
         """
-        named = {f"{prefix}{k}": v for k, v in logs.items()}
+        named = {f"{split}/{k}": v for k, v in logs.items()}
         scalars = {k: float(v) for k, v in named.items() if np.asarray(v).ndim == 0}
         trackers = self._live_trackers()
         for payload in per_class_vectors(named, self.class_names or None):
@@ -491,6 +505,7 @@ class JaxSegmenter(ProgressReporting):
         # and the resolved config come from matrainer's ONE derivation rather than a dict this
         # backend transcribes for itself.
         trackers = self._live_trackers()
+        names = as_metric_names(self.metric_names)
         manifest = log_run_context(trackers, runnable=self)
         model = self.model
         optimizer = nnx.Optimizer(model, _as_optimizer(self.optimizer, self.learning_rate), wrt=nnx.Param)
@@ -505,23 +520,23 @@ class JaxSegmenter(ProgressReporting):
                 x, y = train_seq[index]
                 total += float(train_step(model, optimizer, jnp.asarray(x), jnp.asarray(y)))
                 batches += 1
-            scalars = {"loss": total / batches if batches else float("nan")}
+            scalars = {"train/loss": total / batches if batches else float("nan")}
             if val_seq is not None:
-                scalars.update(self._report(self._run_epoch(val_seq, eval_step, model), prefix="val_", step=epoch))
+                scalars.update(self._report(self._run_epoch(val_seq, eval_step, model), split="val", step=epoch))
             # A `fit()` would have done this for us; a hand-written loop has to. Forgetting it is
             # INVISIBLE — training just runs on one fixed row order forever.
             train_seq.on_epoch_end()
             for callback in self.callbacks or []:
                 flow(callback)(epoch, scalars)
             for tracker in trackers:
-                tracker.log_metrics(scalars, step=epoch)
+                tracker.log_metrics(names(scalars), step=epoch)
             for key, value in scalars.items():
                 self._history.setdefault(key, []).append(value)
             logger.info(
                 f"epoch {epoch + 1}/{self.max_epochs}: " + ", ".join(f"{k}={v:.4f}" for k, v in scalars.items())
             )
 
-        self._computed_metrics = scalars
+        self._computed_metrics = names(scalars)
         logger.info("Training complete.")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
         # Uploads the log file AND stamps the manifest's terminal status. Not optional once a
@@ -539,7 +554,7 @@ class JaxSegmenter(ProgressReporting):
             raise ValueError("JaxSegmenter.test() requires a 'test_set'.")
         _, eval_step = self._make_steps()
         values = self._run_epoch(self._sequence(self.test_set), eval_step, self.model, split="test")
-        self._computed_metrics = self._report(values, prefix="test_")
+        self._computed_metrics = as_metric_names(self.metric_names)(self._report(values, split="test"))
         for tracker in self._live_trackers():
             tracker.log_metrics(self._computed_metrics)
         logger.info(f"Evaluation complete: {self._computed_metrics}")
