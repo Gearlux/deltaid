@@ -281,6 +281,27 @@ trackers:
 
 `metrics_sidecar_path:` additionally writes the run's final scalars to a JSON file.
 
+**What the metrics are called.** Every tracker records the key it is handed, and eight engines
+call the same quantities eight ways — Keras writes `loss` / `val_loss`, fastai `train_loss` /
+`valid_loss` plus **unprefixed validation** metrics, a `transformers.Trainer` `train_*` / `eval_*`.
+So each backend translates out of its engine's vocabulary on the way to the trackers and the
+metrics sidecar, and every one of them records `train/loss`, `val/loss` and `val/<metric>` — the
+same prefix the per-class tables carry (`val/iou_per_class`), so a run reads the same whichever
+backend produced it.
+
+Nothing needs to be set for that. `metric_names:` is the knob for when you want otherwise, and it
+broadcasts into every backend at once:
+
+```yaml
+metric_names: !class:matrainer.MetricNames
+  target: keras                            # record the run in Keras spelling (`val_loss`, …)
+  renames: {jaccard_coeff_multi: iou}      # align a metric the translation cannot know about
+```
+
+What an engine hands its OWN callbacks is untouched either way — `EarlyStopping(monitor="val_loss")`
+still finds Keras' name, and the Keras `History` object keeps Keras' columns. The vocabularies live
+in `matrainer.metric_names`.
+
 ## Predictions
 
 `predict` streams a `recordstream.SegmentationOutput` per record — `logits`, `probs`, and the

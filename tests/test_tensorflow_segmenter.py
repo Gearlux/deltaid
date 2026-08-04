@@ -222,8 +222,8 @@ class TestWhatTheEngineChanges:
         seg.initialize()
         assert isinstance(seg._loss_fn, keras.losses.SparseCategoricalCrossentropy)
         assert seg._loss_fn.from_logits is True
-        miou = next(m for m in seg._metric_objects["train"] if m.name == "miou")
-        assert miou.sparse_y_pred is False
+        mean_iou = next(m for m in seg._metric_objects["train"] if m.name == "mean_iou")
+        assert mean_iou.sparse_y_pred is False
 
     def test_the_batch_is_channels_last(self) -> None:
         from recordstream import collate_records
@@ -240,7 +240,9 @@ class TestTheLoop:
         seg = _segmenter(train_set=_records(8))
         seg.val_set = _records(4)
         seg.run()
-        assert {"loss", "miou", "val_loss", "val_miou"} <= set(seg.computed_metrics)
+        # What LEAVES the run is canonical; `_history` keeps the loop's Keras-shaped columns.
+        assert {"train/loss", "train/mean_iou", "val/loss", "val/mean_iou"} <= set(seg.computed_metrics)
+        assert {"loss", "mean_iou", "val_loss", "val_mean_iou"} <= set(seg._history)
 
     def test_the_loss_actually_descends(self) -> None:
         """A finite loss is not evidence of training — a badly wired one stays finite too."""
@@ -256,13 +258,13 @@ class TestTheLoop:
         and an ERROR on any retrace — which a short final batch is enough to trigger."""
         seg = _segmenter(train_set=_records(7), batch_size=2)  # 3 full batches + a 1-row tail
         seg.run()
-        assert "loss" in seg.computed_metrics
+        assert "train/loss" in seg.computed_metrics
 
     def test_test_writes_a_metrics_sidecar(self, tmp_path: Path) -> None:
         seg = _segmenter(task="test", test_set=_records(4))
         seg.metrics_sidecar_path = str(tmp_path / "metrics.json")
         seg.run()
-        assert "miou" in json.loads((tmp_path / "metrics.json").read_text())["metrics"]
+        assert "test/mean_iou" in json.loads((tmp_path / "metrics.json").read_text())["metrics"]
 
     def test_predict_streams_every_record_to_the_sink_and_closes_it(self) -> None:
         written: List[Any] = []

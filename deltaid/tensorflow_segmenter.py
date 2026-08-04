@@ -36,6 +36,7 @@ import numpy as np
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
 from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
@@ -100,6 +101,11 @@ class TensorFlowSegmenter(ProgressReporting):
         metrics: Shared metrics; ``train_metrics`` / ``val_metrics`` / ``test_metrics`` are that
             split's OWN, merged over ``metrics``. Unlike the Keras backend this loop CAN narrow
             per split — each split gets its own metric OBJECTS, because they are stateful.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. This loop follows Keras' spelling
+            (``loss`` / ``val_loss``); the default translates it to the canonical ``train/loss``
+            / ``val/loss`` for the trackers and the sidecar, leaving what the ``CallbackList``
+            receives alone.
 
     Post-construction slots (YAML / broadcasting): ``val_set``, ``predictions_sink``,
     ``metrics_sidecar_path``.
@@ -130,6 +136,7 @@ class TensorFlowSegmenter(ProgressReporting):
         train_metrics: Optional[List[Lazy[KerasMetric]]] = None,
         val_metrics: Optional[List[Lazy[KerasMetric]]] = None,
         test_metrics: Optional[List[Lazy[KerasMetric]]] = None,
+        metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
         super().__init__()
         self.model: TensorFlowNetwork = cast(TensorFlowNetwork, model)
@@ -156,6 +163,9 @@ class TensorFlowSegmenter(ProgressReporting):
         self.test_metrics: Optional[List[Lazy[KerasMetric]]] = test_metrics
         self.callbacks: Optional[List[Lazy[keras.callbacks.Callback]]] = callbacks
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
         # The live objects `compile()` would have owned. Each SPLIT gets its own metric
@@ -270,7 +280,7 @@ class TensorFlowSegmenter(ProgressReporting):
             ignore = self.ignore_index if self.ignore_index >= 0 else None
             self.metrics = [
                 keras.metrics.MeanIoU(
-                    num_classes=self.num_classes, sparse_y_pred=False, ignore_class=ignore, name="miou"
+                    num_classes=self.num_classes, sparse_y_pred=False, ignore_class=ignore, name="mean_iou"
                 ),
                 keras.metrics.SparseCategoricalAccuracy(name="pixel_accuracy"),
             ]
@@ -415,7 +425,9 @@ class TensorFlowSegmenter(ProgressReporting):
         if trackers:
             from matrainer.keras import keras_tracking_callback
 
-            callbacks.append(keras_tracking_callback(trackers, runnable=self))
+            callbacks.append(
+                keras_tracking_callback(trackers, runnable=self, metric_names=as_metric_names(self.metric_names))
+            )
         return callbacks
 
     def _live_trackers(self) -> List[Tracker]:
@@ -459,8 +471,12 @@ class TensorFlowSegmenter(ProgressReporting):
             logger.info(f"epoch {epoch + 1}/{self.max_epochs}: " + ", ".join(f"{k}={v:.4f}" for k, v in logs.items()))
         callbacks.on_train_end(logs)
 
+        # The HISTORY keeps this loop's Keras-shaped names — it is what the `CallbackList` was
+        # driven with. What LEAVES the run (sidecar, `computed_metrics`) is translated.
         self._history = {k: list(v) for k, v in history.items()}
-        self._computed_metrics = {k: v[-1] for k, v in history.items()}
+        self._computed_metrics = as_metric_names(self.metric_names)(
+            {k: v[-1] for k, v in history.items()}, source="keras"
+        )
         logger.info("Training complete.")
         # Both write LOCAL files and touch no tracker, so they are safe after the run has ended.
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
@@ -476,7 +492,10 @@ class TensorFlowSegmenter(ProgressReporting):
         if self.test_set is None:
             raise ValueError("TensorFlowSegmenter.test() requires a 'test_set'.")
         dataset, _ = self._dataset(self.test_set)
-        self._computed_metrics = self._run_epoch(dataset, self._eval_step_fn("test"), split="test")
+        # `split="test"`: `_run_epoch` returns UNPREFIXED keys whichever split it walked.
+        self._computed_metrics = as_metric_names(self.metric_names)(
+            self._run_epoch(dataset, self._eval_step_fn("test"), split="test"), source="keras", split="test"
+        )
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
 

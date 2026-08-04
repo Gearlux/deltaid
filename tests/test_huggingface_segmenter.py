@@ -248,13 +248,14 @@ class TestTheLoop:
         seg = _segmenter(train_set=_records(8), output_dir=str(tmp_path / "run"))
         seg.val_set = _records(4)
         seg.run()
-        assert {"eval_loss", "eval_mean_iou", "eval_pixel_accuracy"} <= set(seg.computed_metrics)
+        # `eval_` is this engine's word for validation, so the record says `val/`.
+        assert {"val/loss", "val/mean_iou", "val/pixel_accuracy"} <= set(seg.computed_metrics)
 
     def test_test_writes_a_metrics_sidecar(self, tmp_path: Path) -> None:
         seg = _segmenter(task="test", test_set=_records(4), output_dir=str(tmp_path / "run"))
         seg.metrics_sidecar_path = str(tmp_path / "metrics.json")
         seg.run()
-        assert "eval_mean_iou" in json.loads((tmp_path / "metrics.json").read_text())["metrics"]
+        assert "test/mean_iou" in json.loads((tmp_path / "metrics.json").read_text())["metrics"]
 
     def test_predict_streams_every_record_at_the_INPUT_resolution(self, tmp_path: Path) -> None:
         """The sink's consumer expects a prediction the size of the image it came from, and this

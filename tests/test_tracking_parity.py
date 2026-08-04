@@ -119,6 +119,35 @@ def test_trackers_is_a_constructor_param_on_every_backend(stem: str) -> None:
 
 
 @pytest.mark.parametrize("stem", sorted(CALLBACK_BACKENDS | FUNCTION_BACKENDS))
+def test_every_backend_takes_the_metric_naming_knob(stem: str) -> None:
+    """One `metric_names:` key must reach ALL EIGHT, or a comparison's columns stop lining up.
+
+    Every tracker records the key it is handed, and the engines disagree on what to hand it:
+    `val_loss` under Keras, `valid_loss` under fastai, `eval_loss` under a `transformers.Trainer`,
+    `val/loss` here and in the torch loop. A backend left out of this records its curves in
+    columns of its own — which looks like a sparse table rather than a bug.
+    """
+    tree = ast.parse(_backends()[stem])
+    init = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+    annotations = {a.arg: ast.unparse(a.annotation) for a in init.args.args if a.annotation is not None}
+
+    assert "metric_names" in annotations, f"{stem} cannot be told how to name what it records"
+    assert "Lazy[MetricNames]" in annotations["metric_names"], (
+        f"{stem}: the slot must be `Optional[Lazy[MetricNames]]` — wired from YAML it arrives as "
+        f"a deferred marker (got {annotations['metric_names']})"
+    )
+
+
+@pytest.mark.parametrize("stem", sorted(CALLBACK_BACKENDS | FUNCTION_BACKENDS))
+def test_every_backend_applies_the_naming_it_was_given(stem: str) -> None:
+    """Declaring the slot is half of it — what the backend reports has to go THROUGH it."""
+    assert "as_metric_names" in _backends()[stem], (
+        f"{stem} declares `metric_names` but never applies it: call "
+        "`as_metric_names(self.metric_names)` where metrics reach a tracker or the sidecar."
+    )
+
+
+@pytest.mark.parametrize("stem", sorted(CALLBACK_BACKENDS | FUNCTION_BACKENDS))
 def test_no_backend_has_a_logger_slot(stem: str) -> None:
     """`trackers:` is the whole of a run's output wiring. A `logger:` knob named two different
     things — real metric sinks on one backend, framework callbacks on another."""

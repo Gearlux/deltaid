@@ -267,7 +267,9 @@ class TestEndToEnd:
         seg = _segmenter(train_set=_records(8), model=LazyClass(_TinyNet), max_epochs=2)
         seg.val_set = _records(4)
         seg.run()
-        assert {"train_loss", "valid_loss", "dice_multi", "jaccard_coeff_multi"} <= set(seg.computed_metrics)
+        # The Recorder's columns, translated: `valid_loss` is the val loss and its unprefixed
+        # metrics are VALIDATION ones, which is what fastai's vocabulary encodes.
+        assert {"train/loss", "val/loss", "val/dice_multi", "val/jaccard_coeff_multi"} <= set(seg.computed_metrics)
 
     def test_a_missing_val_set_warns_rather_than_failing(self) -> None:
         """A `Learner` always validates — there is no "skip the val loop" mode — so the training

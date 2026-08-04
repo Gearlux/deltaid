@@ -42,6 +42,7 @@ import torch.nn.functional as F
 from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
 from loggair import get_logger
 from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
@@ -104,6 +105,10 @@ class HuggingFaceSegmenter(TorchRunner, ProgressReporting):
             that split's own, merged over ``metrics``. There is no ``train_metrics``: a
             ``Trainer``'s ``compute_metrics`` is its EVAL hook, so the slot would accept a wired
             set and silently never call it.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. A ``Trainer`` writes ``train_*`` and
+            ``eval_*``; the default translates those to the canonical ``train/*`` and ``val/*``
+            for the trackers and the sidecar.
 
     Post-construction slots (YAML / broadcasting): ``val_set``, ``training_arguments``,
     ``trainer``, ``test_loader``, ``predictions_sink``, ``metrics_sidecar_path``.
@@ -133,6 +138,7 @@ class HuggingFaceSegmenter(TorchRunner, ProgressReporting):
         metrics: Optional[List[HuggingFaceMetric]] = None,
         val_metrics: Optional[List[HuggingFaceMetric]] = None,
         test_metrics: Optional[List[HuggingFaceMetric]] = None,
+        metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
         super().__init__()
         self.model: HuggingFaceNetwork = cast(HuggingFaceNetwork, model)
@@ -179,6 +185,9 @@ class HuggingFaceSegmenter(TorchRunner, ProgressReporting):
         self.trainer: Lazy["Trainer"] = LazyClass("transformers.Trainer")
         self.callbacks: Optional[List[Lazy[Any]]] = callbacks
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
         self._computed_metrics: Dict[str, float] = {}
@@ -388,10 +397,12 @@ class HuggingFaceSegmenter(TorchRunner, ProgressReporting):
         manifest = log_run_context(trackers, runnable=self)
         trainer = self._build_trainer(train=self.train_set, evaluate=self.val_set)
         result = trainer.train()
-        self._computed_metrics = {k: float(v) for k, v in result.metrics.items() if _is_number(v)}
+        names = as_metric_names(self.metric_names)
+        scored = {k: float(v) for k, v in result.metrics.items() if _is_number(v)}
         if self.val_set is not None:
-            self._computed_metrics.update({k: float(v) for k, v in trainer.evaluate().items() if _is_number(v)})
-        _log_trainer_history(trainer, trackers)
+            scored.update({k: float(v) for k, v in trainer.evaluate().items() if _is_number(v)})
+        self._computed_metrics = names(scored, source="huggingface")
+        _log_trainer_history(trainer, trackers, names)
         logger.info(f"Training complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
         # Uploads the log file, stamps the manifest's terminal status AND finalizes every tracker.
@@ -405,8 +416,13 @@ class HuggingFaceSegmenter(TorchRunner, ProgressReporting):
     def test(self) -> None:
         if self.test_set is None:
             raise ValueError("HuggingFaceSegmenter.test() requires a 'test_set'.")
-        results = self._build_trainer(evaluate=self.test_set, split="test").evaluate()
-        self._computed_metrics = {k: float(v) for k, v in results.items() if _is_number(v)}
+        # `metric_key_prefix="test"` rather than Trainer's `eval` default: this pass walks the
+        # HELD-OUT split, and the prefix is the only thing that says so — left at `eval` the run
+        # would report its test scores in the column a validation pass fills.
+        results = self._build_trainer(evaluate=self.test_set, split="test").evaluate(metric_key_prefix="test")
+        self._computed_metrics = as_metric_names(self.metric_names)(
+            {k: float(v) for k, v in results.items() if _is_number(v)}, source="huggingface"
+        )
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
 
@@ -539,7 +555,7 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _log_trainer_history(trainer: Any, trackers: Sequence[Tracker]) -> None:
+def _log_trainer_history(trainer: Any, trackers: Sequence[Tracker], names: MetricNames) -> None:
     """Forward EVERY logged step to the trackers, not just the final metrics.
 
     ``Trainer`` accumulates its own ``log_history`` and nothing else sees those rows, so without
@@ -548,7 +564,10 @@ def _log_trainer_history(trainer: Any, trackers: Sequence[Tracker]) -> None:
     if not trackers:
         return
     for entry in getattr(trainer.state, "log_history", []) or []:
-        values = {k: float(v) for k, v in entry.items() if _is_number(v) and k != "epoch"}
+        values = names(
+            {k: float(v) for k, v in entry.items() if _is_number(v) and k != "epoch"},
+            source="huggingface",
+        )
         if not values:
             continue
         step = int(entry.get("step", 0))

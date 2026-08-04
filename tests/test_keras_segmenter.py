@@ -117,9 +117,9 @@ class TestWhatTheEngineChanges:
     def test_the_default_iou_metric_accepts_logits(self) -> None:
         """`MeanIoU` defaults to `sparse_y_pred=True`, which expects an ALREADY-argmaxed
         prediction and raises a shape error on this head's output (measured)."""
-        miou = _default_miou(_segmenter())
-        assert miou.sparse_y_pred is False
-        assert miou.num_classes == NUM_CLASSES
+        mean_iou = _default_miou(_segmenter())
+        assert mean_iou.sparse_y_pred is False
+        assert mean_iou.num_classes == NUM_CLASSES
 
     def test_the_ignore_index_reaches_the_metric_as_keras_spells_it(self) -> None:
         assert _default_miou(_segmenter(ignore_index=2)).ignore_class == 2
@@ -262,7 +262,9 @@ class TestTheLoop:
         seg = _segmenter(train_set=_records(8), model=LazyClass(_TinyNet))
         seg.val_set = _records(4)
         seg.run()
-        assert {"loss", "miou", "val_loss", "val_miou"} <= set(seg.computed_metrics)
+        # What LEAVES the run is canonical; `_history` keeps Keras's own columns.
+        assert {"train/loss", "train/mean_iou", "val/loss", "val/mean_iou"} <= set(seg.computed_metrics)
+        assert {"loss", "mean_iou", "val_loss", "val_mean_iou"} <= set(seg._history)
 
     def test_the_loss_actually_descends(self) -> None:
         """A finite loss is not evidence of training — a badly wired one stays finite too, which
@@ -278,12 +280,12 @@ class TestTheLoop:
         seg = _segmenter(task="test", test_set=_records(4))
         seg.metrics_sidecar_path = str(tmp_path / "metrics.json")
         seg.run()
-        assert "miou" in json.loads((tmp_path / "metrics.json").read_text())["metrics"]
+        assert "test/mean_iou" in json.loads((tmp_path / "metrics.json").read_text())["metrics"]
 
     def test_evaluate_and_test_are_the_same_class(self) -> None:
         seg = _segmenter(task="evaluate", test_set=_records(4))
         seg.run()
-        assert "miou" in seg.computed_metrics
+        assert "test/mean_iou" in seg.computed_metrics
 
     def test_predict_streams_every_record_to_the_sink_and_closes_it(self) -> None:
         written: List[Any] = []

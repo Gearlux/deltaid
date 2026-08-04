@@ -47,6 +47,7 @@ import numpy as np
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
 from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import union_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
@@ -109,6 +110,11 @@ class KerasSegmenter(ProgressReporting):
         loss: Keras loss. ``None`` picks ``SparseCategoricalCrossentropy(from_logits=True)``.
         metrics / train_metrics / val_metrics / test_metrics: Keras metrics. This engine
             computes their UNION — see :meth:`_compiled_metrics`.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. Keras writes ``loss`` / ``val_loss``;
+            the default translates that to the canonical ``train/loss`` / ``val/loss`` on the way
+            to the trackers and the sidecar. What Keras hands its OWN callbacks is untouched —
+            a wired ``EarlyStopping(monitor="val_loss")`` must keep finding that name.
 
     Post-construction slots (YAML / broadcasting): ``val_set``, ``predictions_sink``,
     ``metrics_sidecar_path``.
@@ -136,6 +142,7 @@ class KerasSegmenter(ProgressReporting):
         train_metrics: Optional[List[Lazy[KerasMetric]]] = None,
         val_metrics: Optional[List[Lazy[KerasMetric]]] = None,
         test_metrics: Optional[List[Lazy[KerasMetric]]] = None,
+        metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
         super().__init__()
         # `keras.Model`, not `Lazy[keras.Model]`: the DEFERRED-ness is declared once, on the ctor
@@ -165,6 +172,9 @@ class KerasSegmenter(ProgressReporting):
         # Stored VERBATIM (lazy-init): entries may be deferred markers, flowed where used.
         self.callbacks: Optional[List[Lazy[keras.callbacks.Callback]]] = callbacks
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
         self._history: Dict[str, List[float]] = {}
@@ -255,7 +265,7 @@ class KerasSegmenter(ProgressReporting):
             ignore = self.ignore_index if self.ignore_index >= 0 else None
             self.metrics = [
                 keras.metrics.MeanIoU(
-                    num_classes=self.num_classes, sparse_y_pred=False, ignore_class=ignore, name="miou"
+                    num_classes=self.num_classes, sparse_y_pred=False, ignore_class=ignore, name="mean_iou"
                 ),
                 keras.metrics.SparseCategoricalAccuracy(name="pixel_accuracy"),
             ]
@@ -377,7 +387,9 @@ class KerasSegmenter(ProgressReporting):
 
             # `runnable=self` rather than a params dict: matrainer derives the hyperparameters
             # from the flowed object graph AND dumps the resolved config.
-            callbacks.append(keras_tracking_callback(trackers, runnable=self))
+            callbacks.append(
+                keras_tracking_callback(trackers, runnable=self, metric_names=as_metric_names(self.metric_names))
+            )
         return callbacks
 
     # ---- the four entry points ---------------------------------------------- #
@@ -391,8 +403,13 @@ class KerasSegmenter(ProgressReporting):
         history = self.model.fit(
             train_seq, validation_data=val_seq, epochs=self.max_epochs, callbacks=self._callbacks()
         )
+        # The HISTORY keeps Keras's own names — it is Keras's object, and a `CSVLogger` beside
+        # it writes those same columns. What LEAVES the run — the sidecar and the
+        # `computed_metrics` output — is translated, so it reads beside another engine's.
         self._history = {k: [float(x) for x in v] for k, v in history.history.items()}
-        self._computed_metrics = {k: v[-1] for k, v in self._history.items()}
+        self._computed_metrics = as_metric_names(self.metric_names)(
+            {k: v[-1] for k, v in self._history.items()}, source="keras"
+        )
         logger.info(f"Training complete: {self._computed_metrics}")
         # Local file only — no tracker touch, so it is safe after `keras_tracking_callback`'s
         # `on_train_end` has closed the run out.
@@ -407,7 +424,11 @@ class KerasSegmenter(ProgressReporting):
         if self.test_set is None:
             raise ValueError("KerasSegmenter.test() requires a 'test_set'.")
         results = self.model.evaluate(self._sequence(self.test_set), return_dict=True, callbacks=self._callbacks())
-        self._computed_metrics = {k: float(v) for k, v in results.items()}
+        # `split="test"`: `evaluate()` returns UNPREFIXED keys whichever split it ran on, so
+        # the caller states which one this was — Keras cannot.
+        self._computed_metrics = as_metric_names(self.metric_names)(
+            {k: float(v) for k, v in results.items()}, source="keras", split="test"
+        )
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
 
