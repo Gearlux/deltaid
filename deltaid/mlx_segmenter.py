@@ -4,8 +4,9 @@ The EIGHTH and last backend, and the one whose batch path does genuinely LESS wo
 others rather than the same work differently. Everything upstream of the model is recordstream's
 unchanged — the record stream, the fork guard, ``RecordSequence`` batching, the predictions sink
 and contract, ``write_metrics_sidecar`` and the ``@entrypoint`` dispatch. What is written here is
-:meth:`MlxSegmenter._to_arrays` (the batch shape), the step, the epoch loop, and three per-pixel
-metrics.
+:meth:`MlxSegmenter._to_arrays` (the batch shape), the step and the epoch loop. The METRICS are
+not written here: the named ones are :mod:`matrainer.metric_functions`' reductions over a confusion
+matrix this loop accumulates.
 
 **Three MLX facts shape the loop**, and each is a real difference rather than a spelling one:
 
@@ -51,6 +52,7 @@ import numpy as np
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
 from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_functions import accumulate_confusion, iou_per_class, mean_iou, overall_accuracy, zero_confusion
 from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
@@ -93,54 +95,18 @@ def _valid_mask(labels: Any, ignore_index: int) -> Any:
     return labels != ignore_index
 
 
-def _pixel_accuracy(logits: Any, labels: Any, ignore_index: int) -> Any:
-    """Fraction of NON-IGNORED pixels whose argmax matches the label. Channel axis LAST."""
-    valid = _valid_mask(labels, ignore_index)
-    correct = (mx.argmax(logits, axis=-1) == labels) & valid
-    total = mx.sum(valid)
-    return mx.where(total > 0, mx.sum(correct) / mx.maximum(total, 1), mx.array(0.0))
-
-
-def _mean_iou(logits: Any, labels: Any, ignore_index: int) -> Any:
-    """Mean IoU over the classes PRESENT in this batch.
-
-    Classes absent from both prediction and label are skipped rather than scored 0 — scoring them
-    would drag the mean down with classes the batch never had a chance to get right, which is what
-    ``MulticlassJaccardIndex`` does too.
-    """
-    per_class = _iou_per_class(logits, labels, ignore_index)
-    present = ~mx.isnan(per_class)
-    total = mx.sum(present)
-    return mx.where(total > 0, mx.sum(mx.where(present, per_class, 0.0)) / mx.maximum(total, 1), mx.array(0.0))
-
-
-def _iou_per_class(logits: Any, labels: Any, ignore_index: int) -> Any:
-    """One IoU per class — the ``[C]`` VECTOR a segmentation report actually wants.
-
-    An absent class scores ``nan`` rather than 0, so the per-class table says "not present in this
-    batch" instead of "the model got this wrong".
-
-    A Python loop over the classes rather than a vectorized reduction, because MLX has no ``vmap``
-    over a traced closure the way JAX does and the class count is small — and nothing here is
-    inside a compiled step, so the loop costs one graph node per class and no retrace.
-    """
-    valid = _valid_mask(labels, ignore_index)
-    predicted = mx.argmax(logits, axis=-1)
-    values = []
-    for class_id in range(int(logits.shape[-1])):
-        pred_c = (predicted == class_id) & valid
-        true_c = (labels == class_id) & valid
-        union = mx.sum(pred_c | true_c)
-        values.append(mx.where(union > 0, mx.sum(pred_c & true_c) / mx.maximum(union, 1), mx.array(float("nan"))))
-    return mx.stack(values)
-
-
-#: Metric NAMES this backend resolves. Plain functions, so there is nothing for confluid to tag.
-#: Each takes ``(logits, labels, ignore_index)``.
-_METRICS: Dict[str, Callable[..., Any]] = {
-    "mean_iou": _mean_iou,
-    "pixel_accuracy": _pixel_accuracy,
-    "iou_per_class": _iou_per_class,
+#: Metric NAMES this backend resolves — each derived from the split's CONFUSION MATRIX rather than
+#: computed per batch and averaged, so a number here is the number ``torchmetrics`` reports for the
+#: same predictions and a cross-engine table compares models rather than aggregations.
+#:
+#: The arithmetic is ``matrainer.metric_functions``' and not written out here for the
+#: ``metric_slots`` reason one layer up: three engines in this project need it identically. What
+#: was written here before — a Python loop over the classes in ``mx`` ops — was correct FOR ONE
+#: BATCH and wrong once averaged over an epoch, which is the failure that module exists to name.
+_METRICS: Dict[str, Callable[[Any], Any]] = {
+    "mean_iou": mean_iou,
+    "pixel_accuracy": overall_accuracy,
+    "iou_per_class": iou_per_class,
 }
 
 #: What a run measures when ``metrics`` is left unset.
@@ -176,8 +142,9 @@ class MlxSegmenter(ProgressReporting):
             and agrees with ``torch.nn.CrossEntropyLoss`` exactly (measured).
         metrics: Metric names (``"mean_iou"`` / ``"pixel_accuracy"`` / ``"iou_per_class"``) or
             callables. ``None`` picks the first two.
-        val_metrics / test_metrics: That split's OWN metrics, merged over ``metrics``. There is no
-            ``train_metrics``: the training pass computes the loss and nothing else.
+        train_metrics / val_metrics / test_metrics: That split's OWN metrics, merged over
+            ``metrics``. All three are served: this loop is ours, so each split gets its own set —
+            and the training one costs no second forward pass (see :meth:`_loss_and_grad`).
         class_names: Labels for the per-class metric report; indices otherwise.
         plot_metrics: ALSO send each per-class metric to the trackers as a matplotlib bar chart.
         metric_names: How recorded metrics are named — see
@@ -209,6 +176,7 @@ class MlxSegmenter(ProgressReporting):
         optimizer: MlxOptimizer = "Adam",
         loss: Optional[MlxLoss] = None,
         metrics: Optional[Sequence[MlxMetric]] = None,
+        train_metrics: Optional[Sequence[MlxMetric]] = None,
         val_metrics: Optional[Sequence[MlxMetric]] = None,
         test_metrics: Optional[Sequence[MlxMetric]] = None,
         class_names: Optional[List[str]] = None,
@@ -238,8 +206,12 @@ class MlxSegmenter(ProgressReporting):
         # Sentinels: `None` means "not chosen", never "no loss".
         self.loss: Optional[MlxLoss] = loss
         self.metrics: Optional[Sequence[MlxMetric]] = metrics
-        # No `train_metrics`, and that is a property of this loop rather than an omission: the
-        # training pass computes the LOSS and nothing else.
+        # Per-split ADDITIONS, merged over `metrics` by the shared rule. ALL THREE are served:
+        # this loop belongs to the project, so each split gets its own set. The claim this slot's
+        # absence used to rest on ("the training pass computes the LOSS and nothing else") was true
+        # of the loop as written, not of MLX — the step now returns its logits beside the loss, so
+        # a training metric costs ONE reduction per batch.
+        self.train_metrics: Optional[Sequence[MlxMetric]] = train_metrics
         self.val_metrics: Optional[Sequence[MlxMetric]] = val_metrics
         self.test_metrics: Optional[Sequence[MlxMetric]] = test_metrics
         self.class_names: Optional[List[str]] = list(class_names) if class_names else None
@@ -365,16 +337,24 @@ class MlxSegmenter(ProgressReporting):
         return compute
 
     def _loss_and_grad(self) -> Any:
-        """The step: a loss over ``(model, x, y)``, differentiated by ``nn.value_and_grad``."""
+        """The step: a loss over ``(model, x, y)``, differentiated by ``nn.value_and_grad``.
+
+        It returns ``(loss, logits)`` and MLX differentiates the FIRST element of a returned tuple
+        (verified), so the logits ride out beside the loss for free — which is what lets the
+        training metrics be scored from the very tensor the gradient was taken through. Re-running
+        the model to get them would cost a second forward pass AND measure a different network,
+        since the module is in TRAIN mode here (dropout, batch norm).
+        """
         loss_fn = self._loss_fn()
 
         def compute(model: Any, x: Any, y: Any) -> Any:
-            return loss_fn(model(x), y)
+            logits = model(x)
+            return loss_fn(logits, y), logits
 
         return nn.value_and_grad(self.model, compute)
 
     def _split_metrics(self, split: str) -> Sequence[MlxMetric]:
-        """The metric list for one eval split — its own slot merged over the shared ``metrics``.
+        """The metric list for one split — its own slot merged over the shared ``metrics``.
 
         The combination rule is the workspace-wide one
         (:func:`~matrainer.metric_slots.merge_metric_specs`), so a config moving between backends
@@ -383,8 +363,37 @@ class MlxSegmenter(ProgressReporting):
         spec = merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics"))
         return spec if spec is not None else list(_DEFAULT_METRICS)
 
+    def _partition_metrics(self, split: str) -> Any:
+        """One split's metrics, split into the CONFUSION-based ones and the per-batch ones.
+
+        Partitioned by NAME, before resolution, which is why only a NAMED metric can be
+        confusion-based: a user-supplied callable is scored per batch, since nothing here can know
+        what it would want accumulated.
+        """
+        confusion: Dict[str, Callable[[Any], Any]] = {}
+        batchwise: List[MlxMetric] = []
+        for metric in self._split_metrics(split):
+            name = flow(metric)
+            if isinstance(name, str) and name in _METRICS:
+                confusion[name] = _METRICS[name]
+            else:
+                batchwise.append(metric)
+        return confusion, batchwise
+
+    def _split_confusion(self, confusion: Dict[str, Callable[[Any], Any]]) -> Optional[np.ndarray]:
+        """A zeroed accumulator when this split wants one, else ``None``."""
+        if not confusion:
+            return None
+        if not self.num_classes:
+            raise RuntimeError("MlxSegmenter: a confusion-matrix metric needs num_classes.")
+        return zero_confusion(self.num_classes)
+
     def _metric_values(self, logits: Any, labels: Any, metrics: Sequence[MlxMetric]) -> Dict[str, Any]:
-        """One batch's metric values, SCALARS AND VECTORS alike (as numpy, so they can be summed)."""
+        """One batch's values for the metrics that are NOT confusion-based — user callables.
+
+        Averaged over batches by the caller, which is the best a loop can do for a function whose
+        aggregation it cannot know. Returned as numpy so they can be summed.
+        """
         out: Dict[str, Any] = {}
         for metric in metrics:
             fn = _as_metric(metric)
@@ -394,9 +403,16 @@ class MlxSegmenter(ProgressReporting):
         return out
 
     def _evaluate(self, sequence: RecordSequence, split: str = "val") -> Dict[str, Any]:
-        """One pass in EVAL mode, returning ``{"loss": …, **metrics}``."""
+        """One pass in EVAL mode, returning ``{"loss": …, **metrics}``.
+
+        The LOSS is averaged over batches, which is what a loss is. A NAMED metric is not: it
+        accumulates into this split's confusion matrix and is reduced ONCE at the end, so the
+        number matches what torchmetrics reports for the same predictions. Only a user-supplied
+        CALLABLE is still batch-averaged.
+        """
         loss_fn = self._loss_fn()
-        metrics = self._split_metrics(split)
+        confusion, batchwise = self._partition_metrics(split)
+        matrix = self._split_confusion(confusion)
         total, batches = 0.0, 0
         sums: Dict[str, Any] = {}
         # MLX carries train/eval as module STATE, so the mode is set ONCE here rather than passed
@@ -412,11 +428,17 @@ class MlxSegmenter(ProgressReporting):
             mx.eval(loss, logits)
             total += float(loss)
             batches += 1
-            for key, value in self._metric_values(logits, ya, metrics).items():
+            if matrix is not None:
+                accumulate_confusion(matrix, np.asarray(logits), np.asarray(ya), self.ignore_index)
+            for key, value in self._metric_values(logits, ya, batchwise).items():
                 sums[key] = value if key not in sums else sums[key] + value
         if not batches:
             return {"loss": float("nan")}
-        return {"loss": total / batches, **{k: v / batches for k, v in sums.items()}}
+        values: Dict[str, Any] = {"loss": total / batches}
+        values.update({k: v / batches for k, v in sums.items()})
+        if matrix is not None:
+            values.update({name: fn(matrix) for name, fn in confusion.items()})
+        return values
 
     def _report(self, logs: Dict[str, Any], split: str = "train", step: Optional[int] = None) -> Dict[str, float]:
         """Split one epoch's values into the SCALARS a tracker takes and the vectors it does not.
@@ -465,21 +487,44 @@ class MlxSegmenter(ProgressReporting):
         train_seq = self._sequence(self.train_set, shuffle=True)
         val_seq = self._sequence(self.val_set) if self.val_set is not None else None
 
+        # Resolved ONCE, outside the epoch loop: the partition depends only on the config, while
+        # the accumulator has to be zeroed per EPOCH rather than per batch.
+        train_confusion, train_batchwise = self._partition_metrics("train")
+
         scalars: Dict[str, float] = {}
         for epoch in range(self.max_epochs):
             network.train(True)
             total, batches = 0.0, 0
+            sums: Dict[str, Any] = {}
+            matrix = self._split_confusion(train_confusion)
             for index in range(len(train_seq)):
                 x, y = train_seq[index]
-                loss, grads = step(network, mx.array(x), mx.array(y))
+                ya = mx.array(y)
+                (loss, logits), grads = step(network, mx.array(x), ya)
                 optimizer.update(network, grads)
                 # MLX is LAZY: without this the graph grows every step until memory runs out, and
                 # nothing warns — the run just gets slower and then dies. One eval per step, over
-                # the parameters AND the optimizer state, is what forces the work.
-                mx.eval(network.parameters(), optimizer.state, loss)
+                # the parameters AND the optimizer state, is what forces the work. The logits join
+                # it because the metrics below read them.
+                mx.eval(network.parameters(), optimizer.state, loss, logits)
                 total += float(loss)
                 batches += 1
+                # Scored from the logits the gradient was taken through, so these numbers describe
+                # the network AS IT TRAINED — the module is in train mode here, so a gap against
+                # the validation column is expected rather than a defect.
+                if matrix is not None:
+                    accumulate_confusion(matrix, np.asarray(logits), np.asarray(ya), self.ignore_index)
+                for key, value in self._metric_values(logits, ya, train_batchwise).items():
+                    sums[key] = value if key not in sums else sums[key] + value
             scalars = {"train/loss": total / batches if batches else float("nan")}
+            if batches:
+                # The SAME reduction the eval pass takes (`_evaluate`) — accumulated once per
+                # epoch, not averaged per batch — so the two columns of one row are the same
+                # computation on different data.
+                values: Dict[str, Any] = {k: v / batches for k, v in sums.items()}
+                if matrix is not None:
+                    values.update({name: fn(matrix) for name, fn in train_confusion.items()})
+                scalars.update(self._report(values, split="train", step=epoch))
             if val_seq is not None:
                 scalars.update(self._report(self._evaluate(val_seq), split="val", step=epoch))
             # A `fit()` would have done this; a hand-written loop must. Forgetting it is
@@ -630,7 +675,12 @@ def _as_loss(value: Optional[MlxLoss]) -> Callable[..., Any]:
 
 
 def _as_metric(value: MlxMetric) -> Callable[..., Any]:
-    """A metric from a callable or its NAME (``"mean_iou"`` / ``"pixel_accuracy"`` / …)."""
+    """A metric CALLABLE — the per-batch kind, over ``(logits, labels, ignore_index)``.
+
+    A NAME in :data:`_METRICS` never reaches here: ``_partition_metrics`` routes it to the
+    confusion accumulator, whose functions take a MATRIX. What is left is resolving a user-supplied
+    callable and refusing an unknown name, naming the ones that exist.
+    """
     built = flow(value)
     if callable(built):
         return cast(Callable[..., Any], built)

@@ -166,6 +166,32 @@ model: !lazy:deltaid.SegmentationModelPytorch
   encoder_name: resnet34
   encoder_weights: imagenet
 
+# --- the OTHER kind of model, on a dimension of its own ----------------------
+# `--model unet` swaps the zoo wrapper for deltaid's own shared spec, which the
+# five non-torch backends already train (their blocks below wire their native
+# implementation). This block is what makes it reachable from the THREE TORCH
+# backends too, so `lightning` / `torch` / `fastai` can run the same 488,739
+# parameters the other five do:
+#
+#   deltaid train examples/train_unet_oxford_pets.yaml --model unet
+#   deltaid train examples/train_unet_oxford_pets.yaml --model unet --framework torch
+#
+# It is a SECOND dimension rather than a second config, and it composes with
+# `--framework`: the sweep overlay (`examples/sweep/`) nests a block of the same
+# name inside each non-torch block, so `--framework mlx --model unet` reaches
+# `MlxUNet` instead of the `TorchUNet` below.
+#
+# Expect a WORSE score than the zoo wrapper, and that is the point rather than a
+# disappointment: a small net trained from scratch loses to a pretrained ResNet
+# encoder every time. This one is the control — the same architecture in five
+# vocabularies — not the recommendation.
+unet: !scope:model=unet
+  model: !lazy:deltaid.TorchUNet
+    # `(H, W, C)` — channels-LAST even though the torch tensor is NCHW, so ONE
+    # config line drives any of the five implementations. The value matches the
+    # joint resize above; it must stay divisible by 2 ** len(widths) = 8.
+    input_shape: [224, 224, 3]
+
 # The default backend gets a block of its own even though the top level already
 # IS lightning: confluid raises when a scope activation matches no block, so an
 # undeclared default would make `--framework lightning` an error. That raise is

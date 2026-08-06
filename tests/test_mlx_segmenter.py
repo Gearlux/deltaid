@@ -19,13 +19,12 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
-import mlx.core as mx
 import numpy as np
 import pytest
 from confluid import LazyClass, lazy_param_names, to_pydantic
 from recordstream import Mask, collate_records
 
-from deltaid.mlx_segmenter import MlxSegmenter, _iou_per_class, _mean_iou, _pixel_accuracy
+from deltaid.mlx_segmenter import _METRICS, MlxSegmenter
 from deltaid.unet.mlx_unet import MlxUNet
 
 NUM_CLASSES = 3
@@ -122,7 +121,7 @@ class TestWhatTheEngineChanges:
         parameters AND the optimizer state, not only the loss — the state is what carries the
         momentum buffers."""
         source = inspect.getsource(MlxSegmenter.fit)
-        assert "mx.eval(network.parameters(), optimizer.state, loss)" in source
+        assert "mx.eval(network.parameters(), optimizer.state, loss, logits)" in source
 
     def test_the_train_mode_is_set_PER_PHASE_not_per_call(self) -> None:
         """MLX carries train/eval as module STATE, so a `training=False` default on `__call__`
@@ -162,61 +161,68 @@ class TestWhatTheEngineChanges:
 
 
 # --------------------------------------------------------------------------- #
-# The metrics — plain `mx` functions, so they are checkable directly
+# The metrics — resolved by NAME, accumulated over the split
 # --------------------------------------------------------------------------- #
 class TestTheMetrics:
-    """The metric functions take MLX arrays, so each case converts — the numbers are the same
-    claims the JAX twin makes, over a different array type."""
+    """The ARITHMETIC lives in `matrainer.metric_functions`, pinned there against torchmetrics.
 
-    def _perfect(self) -> Any:
-        labels = np.array([[[0, 1], [2, 0]]], dtype="int32")
-        logits = np.zeros((1, 2, 2, NUM_CLASSES), dtype="float32")
-        for y in range(2):
-            for x in range(2):
-                logits[0, y, x, labels[0, y, x]] = 10.0
-        return logits, labels
+    What is this backend's own — and what is checked here — is the WIRING: which names reach the
+    accumulator, and that `ignore_index` travels with them.
+    """
 
-    def test_a_perfect_prediction_scores_one(self) -> None:
-        logits, labels = self._perfect()
-        assert float(_mean_iou(mx.array(logits), mx.array(labels), -100)) == pytest.approx(1.0)
-        assert float(_pixel_accuracy(mx.array(logits), mx.array(labels), -100)) == pytest.approx(1.0)
+    def test_the_named_metrics_are_matrainers_confusion_functions(self) -> None:
+        """Not a re-implementation: the same objects the torch backends' torchmetrics agree with,
+        so a number from this loop is comparable with one from theirs."""
+        from matrainer.metric_functions import iou_per_class, mean_iou, overall_accuracy
 
-    def test_ignored_pixels_are_excluded_from_both(self) -> None:
+        assert _METRICS == {
+            "mean_iou": mean_iou,
+            "pixel_accuracy": overall_accuracy,
+            "iou_per_class": iou_per_class,
+        }
+
+    def test_a_named_metric_is_ACCUMULATED_and_a_callable_is_averaged(self) -> None:
+        """Partitioned by NAME, before resolution — nothing here can know what a user-supplied
+        callable would want accumulated."""
+        seg = _segmenter(metrics=["mean_iou", lambda logits, labels, ignore: 1.0])
+        confusion, batchwise = seg._partition_metrics("val")
+
+        assert list(confusion) == ["mean_iou"]
+        assert len(batchwise) == 1 and callable(batchwise[0])
+
+    def test_no_accumulator_is_built_when_no_named_metric_was_wired(self) -> None:
+        seg = _segmenter(metrics=[lambda logits, labels, ignore: 1.0])
+        assert seg._split_confusion(seg._partition_metrics("val")[0]) is None
+
+    def test_the_metric_does_not_depend_on_the_BATCH_SIZE(self) -> None:
+        """The property the whole change exists for, exercised through the real epoch loop.
+
+        A per-batch average cannot have it — a class absent from a batch is skipped by that
+        batch's mean, so the value moves with the batch size.
+        """
+        records = _records(8)
+        scores = {}
+        for size in (2, 4, 8):
+            seg = _segmenter(batch_size=size)
+            seg.initialize()
+            scores[size] = float(seg._evaluate(seg._sequence(records))["mean_iou"])
+
+        assert len({round(value, 10) for value in scores.values()}) == 1, scores
+
+    def test_the_ignore_index_reaches_the_accumulator(self) -> None:
         """The same knob must drop the void class from the SCORE as well as the loss, or the model
         is graded on pixels it was told to ignore."""
-        labels = np.array([[[0, 100], [100, 0]]], dtype="int32")
-        logits = np.zeros((1, 2, 2, NUM_CLASSES), dtype="float32")
-        logits[..., 0] = 10.0
-        assert float(_pixel_accuracy(mx.array(logits), mx.array(labels), 100)) == pytest.approx(1.0)
-        assert float(_mean_iou(mx.array(logits), mx.array(labels), 100)) == pytest.approx(1.0)
+        seg = _segmenter(ignore_index=100)
+        seg.initialize()
+        records = _records(2)
+        for record in records:
+            record["mask"] = Mask(np.full((SIDE, SIDE), 100, dtype=np.int64))
 
-    def test_a_class_absent_from_the_batch_is_SKIPPED_not_scored_zero(self) -> None:
-        """Scoring it 0 would drag the mean down with a class the batch never had a chance to get
-        right — which is what `MulticlassJaccardIndex` avoids too."""
-        labels = np.zeros((1, 2, 2), dtype="int32")
-        logits = np.zeros((1, 2, 2, NUM_CLASSES), dtype="float32")
-        logits[..., 0] = 10.0
-        assert float(_mean_iou(mx.array(logits), mx.array(labels), -100)) == pytest.approx(1.0)
-
-    def test_the_per_class_vector_reports_nan_for_an_absent_class(self) -> None:
-        """`nan` says "not present in this batch"; 0 would say "the model got this wrong"."""
-        labels = np.zeros((1, 2, 2), dtype="int32")
-        logits = np.zeros((1, 2, 2, NUM_CLASSES), dtype="float32")
-        logits[..., 0] = 10.0
-        values = np.asarray(_iou_per_class(mx.array(logits), mx.array(labels), -100))
-        assert values.shape == (NUM_CLASSES,)
-        assert values[0] == pytest.approx(1.0)
-        assert np.isnan(values[1]) and np.isnan(values[2])
-
-    def test_a_fully_ignored_batch_scores_zero_rather_than_dividing_by_zero(self) -> None:
-        labels = np.full((1, 2, 2), 100, dtype="int32")
-        logits = np.zeros((1, 2, 2, NUM_CLASSES), dtype="float32")
-        assert float(_pixel_accuracy(mx.array(logits), mx.array(labels), 100)) == 0.0
-        assert float(_mean_iou(mx.array(logits), mx.array(labels), 100)) == 0.0
+        values = seg._evaluate(seg._sequence(records))
+        assert float(values["mean_iou"]) == 0.0
+        assert float(values["pixel_accuracy"]) == 0.0
 
 
-# --------------------------------------------------------------------------- #
-# The contract every backend shares
 # --------------------------------------------------------------------------- #
 class TestTheSharedContract:
     def test_num_classes_resolution_agrees(self) -> None:
@@ -231,10 +237,23 @@ class TestTheSharedContract:
         assert list(seg._split_metrics("val")) == ["mean_iou", "pixel_accuracy"]
         assert list(seg._split_metrics("test")) == ["mean_iou"]
 
-    def test_there_is_no_train_metrics_slot(self) -> None:
-        """A property of this loop rather than an omission: the training pass computes the LOSS and
-        nothing else, so a train-only metric would have nowhere to be computed."""
-        assert "train_metrics" not in inspect.signature(MlxSegmenter.__init__).parameters
+    def test_all_four_metric_slots_are_declared(self) -> None:
+        """The training pass scores too. What used to be described as a property of MLX was a
+        property of the loop as written: the step returns `(loss, logits)` and MLX differentiates
+        the FIRST element of a returned tuple, so the logits ride out for free."""
+        params = inspect.signature(MlxSegmenter.__init__).parameters
+        assert {"metrics", "train_metrics", "val_metrics", "test_metrics"} <= set(params)
+        assert list(_segmenter(metrics=["mean_iou"], train_metrics=["pixel_accuracy"])._split_metrics("train")) == [
+            "mean_iou",
+            "pixel_accuracy",
+        ]
+
+    def test_the_step_returns_the_logits_it_took_the_gradient_through(self) -> None:
+        """`nn.value_and_grad` differentiates the FIRST element of the returned tuple, so the
+        logits come back beside the loss and the training metrics measure the network AS IT
+        TRAINED — no second forward pass, and no eval-mode network standing in for a train-mode
+        one."""
+        assert "return loss_fn(logits, y), logits" in inspect.getsource(MlxSegmenter._loss_and_grad)
 
     def test_the_entrypoint_markers_are_the_dispatch_table(self) -> None:
         from recordstream.runnable import runnable_entrypoints

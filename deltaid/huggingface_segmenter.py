@@ -42,6 +42,7 @@ import torch.nn.functional as F
 from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
 from loggair import get_logger
 from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_functions import accumulate_confusion, iou_per_class, mean_iou, overall_accuracy, zero_confusion
 from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
@@ -362,17 +363,28 @@ class HuggingFaceSegmenter(TorchRunner, ProgressReporting):
         emits at a reduced resolution.
         """
         metrics = merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or list(_DEFAULT_METRICS)
-        ignore_index = self.ignore_index
+        ignore_index, num_classes = self.ignore_index, self.num_classes
 
-        def compute_metrics(eval_pred: Any) -> Dict[str, float]:
+        def compute_metrics(eval_pred: Any) -> Dict[str, Any]:
             logits, labels = eval_pred.predictions, eval_pred.label_ids
             logits = logits[0] if isinstance(logits, tuple) else logits
-            upsampled = _upsample_logits(np.asarray(logits), np.asarray(labels).shape[-2:])
-            out: Dict[str, float] = {}
-            for metric in metrics:
+            targets = np.asarray(labels)
+            upsampled = _upsample_logits(np.asarray(logits), targets.shape[-2:])
+            confusion, batchwise = _partition_metrics(metrics)
+            out: Dict[str, Any] = {}
+            if confusion:
+                if not num_classes:
+                    raise RuntimeError("HuggingFaceSegmenter: a confusion-matrix metric needs num_classes.")
+                # The channel axis is SECOND here (`[N, C, H, W]`, transformers' contract) and the
+                # accumulator argmaxes the LAST, so it moves — the one line of this that is about
+                # THIS engine rather than about the metric.
+                matrix = zero_confusion(num_classes)
+                accumulate_confusion(matrix, np.moveaxis(upsampled, 1, -1), targets, ignore_index)
+                out.update({name: fn(matrix) for name, fn in confusion.items()})
+            for metric in batchwise:
                 fn = _as_metric(metric)
                 name = getattr(fn, "__name__", str(metric)).lstrip("_")
-                out[name] = float(fn(upsampled, np.asarray(labels), ignore_index))
+                out[name] = float(fn(upsampled, targets, ignore_index))
             return out
 
         return compute_metrics
@@ -500,48 +512,52 @@ def _upsample_logits(logits: np.ndarray, size: Any) -> np.ndarray:
     return cast(np.ndarray, resized.numpy())
 
 
-def _mean_iou(logits: np.ndarray, labels: np.ndarray, ignore_index: int) -> float:
-    """Mean intersection-over-union over the classes PRESENT in either prediction or target.
-
-    A class absent from both is skipped rather than scored 0 — otherwise a split that happens not
-    to contain one of the label scheme's classes drags the mean down for a reason that says
-    nothing about the model.
-    """
-    predicted = np.argmax(logits, axis=1)
-    valid = labels != ignore_index
-    scores = []
-    for class_id in range(logits.shape[1]):
-        pred_c = (predicted == class_id) & valid
-        true_c = (labels == class_id) & valid
-        union = np.logical_or(pred_c, true_c).sum()
-        if union == 0:
-            continue
-        scores.append(float(np.logical_and(pred_c, true_c).sum()) / float(union))
-    return float(np.mean(scores)) if scores else 0.0
-
-
-def _pixel_accuracy(logits: np.ndarray, labels: np.ndarray, ignore_index: int) -> float:
-    """Fraction of non-ignored pixels whose argmax matches the label."""
-    valid = labels != ignore_index
-    total = int(valid.sum())
-    if total == 0:
-        return 0.0
-    return float(((np.argmax(logits, axis=1) == labels) & valid).sum()) / float(total)
-
-
-#: The metrics a config can name. Plain FUNCTIONS over numpy — there is no class for a `!class:`
-#: tag to name or for confluid's registry to tag, the same situation the fastai names are in.
-_METRICS: Dict[str, Callable[[np.ndarray, np.ndarray, int], float]] = {
-    "mean_iou": _mean_iou,
-    "pixel_accuracy": _pixel_accuracy,
+#: Metric NAMES this backend resolves — derived from the split's CONFUSION MATRIX.
+#:
+#: Unlike the JAX and MLX loops, this backend was never batch-averaging: `batch_eval_metrics` is
+#: False by default, so a `Trainer` gathers the WHOLE split and calls `compute_metrics` ONCE
+#: (verified) — the hand-written numpy that used to live here agreed with these to ten decimals on
+#: real arrays. What the swap buys is therefore not a fix but the two things sharing an
+#: implementation buys: agreement with the torch backends' torchmetrics BY CONSTRUCTION rather than
+#: by two implementations happening to match, and `iou_per_class` — the per-class VECTOR the other
+#: two engines already offered and this one could not.
+#:
+#: Plain functions over a matrix, so there is nothing for confluid to tag; see the module docstring.
+_METRICS: Dict[str, Callable[[np.ndarray], Any]] = {
+    "mean_iou": mean_iou,
+    "pixel_accuracy": overall_accuracy,
+    "iou_per_class": iou_per_class,
 }
 
 #: What an unset `metrics:` computes.
 _DEFAULT_METRICS = ("mean_iou", "pixel_accuracy")
 
 
+def _partition_metrics(metrics: Sequence[HuggingFaceMetric]) -> Any:
+    """Split a metric list into the CONFUSION-based ones and the per-batch callables.
+
+    By NAME, before resolution, which is why only a NAMED metric can be confusion-based: nothing
+    here can know what a user-supplied callable would want accumulated, so one keeps the
+    ``(logits, labels, ignore_index)`` protocol it was written against.
+    """
+    confusion: Dict[str, Callable[[np.ndarray], Any]] = {}
+    batchwise: List[HuggingFaceMetric] = []
+    for metric in metrics:
+        name = flow(metric)
+        if isinstance(name, str) and name in _METRICS:
+            confusion[name] = _METRICS[name]
+        else:
+            batchwise.append(metric)
+    return confusion, batchwise
+
+
 def _as_metric(value: HuggingFaceMetric) -> Callable[..., float]:
-    """A metric callable from a callable or from its NAME."""
+    """A metric CALLABLE — the per-batch kind, over ``(logits, labels, ignore_index)``.
+
+    A NAME in :data:`_METRICS` never reaches here: :func:`_partition_metrics` routes it to the
+    confusion accumulator, whose functions take a MATRIX. What is left is resolving a user-supplied
+    callable and refusing an unknown name, naming the ones that exist.
+    """
     built = flow(value)
     if callable(built):
         return cast(Callable[..., float], built)

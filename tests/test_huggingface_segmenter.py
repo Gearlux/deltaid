@@ -26,7 +26,7 @@ import torch
 from confluid import lazy_param_names, to_pydantic
 from recordstream import Mask
 
-from deltaid.huggingface_segmenter import HuggingFaceSegmenter, _mean_iou, _pixel_accuracy, _upsample_logits
+from deltaid.huggingface_segmenter import _METRICS, HuggingFaceSegmenter, _upsample_logits
 
 NUM_CLASSES = 3
 SIDE = 32
@@ -145,31 +145,85 @@ class TestWhatTheEngineChanges:
 
 
 # --------------------------------------------------------------------------- #
-# The metric functions — plain numpy, so they are checkable directly
+# The metric functions — resolved by NAME, derived from the split's confusion matrix
 # --------------------------------------------------------------------------- #
 class TestTheBuiltInMetrics:
-    def test_a_perfect_prediction_scores_one(self) -> None:
+    """The ARITHMETIC lives in `matrainer.metric_functions`, pinned there against torchmetrics.
+
+    What is this backend's own is the WIRING, and one line of it is engine-specific: transformers'
+    logits are `[N, C, H, W]` while the accumulator argmaxes the LAST axis, so the channel axis has
+    to move. Getting that wrong scores the model against its own width and is not obviously wrong
+    in any output — which is why the checks below drive the real hook rather than the functions.
+    """
+
+    def _hook(self, **kwargs: Any) -> Any:
+        seg = _segmenter(**kwargs)
+        return seg._metrics_hook("val")
+
+    def _prediction(self, logits: np.ndarray, labels: np.ndarray) -> Any:
+        return type("P", (), {"predictions": logits, "label_ids": labels})()
+
+    def test_the_named_metrics_are_matrainers_confusion_functions(self) -> None:
+        """Not a re-implementation. The hand-written numpy that used to live here agreed with
+        these to ten decimals on real arrays — what sharing buys is that it cannot DRIFT, plus
+        `iou_per_class`, which this backend's own registry never had."""
+        from matrainer.metric_functions import iou_per_class, mean_iou, overall_accuracy
+
+        assert _METRICS == {
+            "mean_iou": mean_iou,
+            "pixel_accuracy": overall_accuracy,
+            "iou_per_class": iou_per_class,
+        }
+
+    def test_a_perfect_prediction_scores_one_through_the_hook(self) -> None:
         labels = np.array([[[0, 1], [2, 0]]])
         logits = np.zeros((1, NUM_CLASSES, 2, 2))
         for y in range(2):
             for x in range(2):
                 logits[0, labels[0, y, x], y, x] = 10.0
-        assert _mean_iou(logits, labels, -100) == pytest.approx(1.0)
-        assert _pixel_accuracy(logits, labels, -100) == pytest.approx(1.0)
 
-    def test_ignored_pixels_are_excluded_from_both(self) -> None:
+        values = self._hook()(self._prediction(logits, labels))
+        assert values["mean_iou"] == pytest.approx(1.0)
+        assert values["pixel_accuracy"] == pytest.approx(1.0)
+
+    def test_the_channel_axis_is_moved_before_the_accumulator_sees_it(self) -> None:
+        """`[N, C, H, W]` is transformers' contract; the accumulator argmaxes the LAST axis. A
+        non-square map is what makes the mistake visible — with H == W it would still run."""
+        labels = np.zeros((1, 2, 4), dtype=np.int64)
+        labels[0, 1, :] = 1
+        logits = np.zeros((1, NUM_CLASSES, 2, 4))
+        logits[0, 0, 0, :] = 10.0
+        logits[0, 1, 1, :] = 10.0
+
+        assert self._hook()(self._prediction(logits, labels))["mean_iou"] == pytest.approx(1.0)
+
+    def test_ignored_pixels_are_excluded(self) -> None:
         """The same knob must drop the void class from the SCORE as well as the loss, or the
         model is graded on pixels it was told to ignore."""
         labels = np.array([[[0, 255], [255, 0]]])
         logits = np.zeros((1, NUM_CLASSES, 2, 2))
         logits[0, 0] = 10.0  # every pixel predicted class 0 — correct on both non-ignored ones
-        assert _pixel_accuracy(logits, labels, 255) == pytest.approx(1.0)
-        assert _mean_iou(logits, labels, 255) == pytest.approx(1.0)
+
+        values = self._hook(ignore_index=255)(self._prediction(logits, labels))
+        assert values["pixel_accuracy"] == pytest.approx(1.0)
+        assert values["mean_iou"] == pytest.approx(1.0)
 
     def test_a_fully_ignored_batch_scores_zero_rather_than_dividing_by_zero(self) -> None:
         labels = np.full((1, 2, 2), 255)
-        assert _pixel_accuracy(np.zeros((1, NUM_CLASSES, 2, 2)), labels, 255) == 0.0
-        assert _mean_iou(np.zeros((1, NUM_CLASSES, 2, 2)), labels, 255) == 0.0
+        values = self._hook(ignore_index=255)(self._prediction(np.zeros((1, NUM_CLASSES, 2, 2)), labels))
+
+        assert values["pixel_accuracy"] == 0.0
+        assert values["mean_iou"] == 0.0
+
+    def test_the_per_class_vector_is_now_reachable_here_too(self) -> None:
+        """The capability the swap added: `iou_per_class` was in the JAX and MLX registries and
+        not in this one, so a config could not ask this backend for the per-class table."""
+        labels = np.zeros((1, 2, 2), dtype=np.int64)
+        logits = np.zeros((1, NUM_CLASSES, 2, 2))
+        logits[0, 0] = 10.0
+
+        values = self._hook(metrics=["iou_per_class"])(self._prediction(logits, labels))
+        assert np.asarray(values["iou_per_class"]).shape == (NUM_CLASSES,)
 
     def test_the_upsample_preserves_the_class_count_and_reaches_the_label_size(self) -> None:
         out = _upsample_logits(np.zeros((2, NUM_CLASSES, 8, 8)), (32, 32))

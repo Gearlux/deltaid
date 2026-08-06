@@ -35,6 +35,14 @@ checkpoints/
 *.ckpt
 *.pt
 *.pth
+# Everything `examples/sweep/run_sweep.sh` writes: per-run logs, the file-backed trackers, the
+# SavedModel export and the huggingface Trainer's output_dir all land under one tree on purpose.
+sweep_logs/
+hf_runs/
+# The run manifest's own tree. `RunManifest` falls back to `runs/<experiment>/<run>` when nothing
+# sets `run_dir` (matrainer's `tracking/manifest.py`), which is independent of a tracker's
+# `save_dir` — so a sweep writes here as well as under `sweep_logs/`.
+runs/
 
 # Linter outputs
 isort-checkstyle.xml

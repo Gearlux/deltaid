@@ -197,6 +197,83 @@ class TestPerSplitMetrics:
 
 
 # --------------------------------------------------------------------------- #
+# The TRAIN split reduces once per epoch, like the eval splits
+# --------------------------------------------------------------------------- #
+class TestTheTrainingSplitReducesOncePerEpoch:
+    """It used to log the per-BATCH values with ``on_step=True``, which lost them two ways.
+
+    Lightning's ``log_every_n_steps`` (50 by default) DROPS a per-step series shorter than the
+    interval, so a 32-step run recorded no training metric at all — measured on the backend sweep
+    at ``--epochs 1``, where `lightning_zoo` wrote `train/loss` and nothing else beside a
+    `torch_zoo` row carrying `train/mean_iou` + `train/pixel_accuracy` from the SAME config. And
+    what survived a longer run was one batch's value where every other backend reports an epoch
+    aggregate, so two columns of a cross-framework table were not measuring the same thing.
+    """
+
+    def _fed(self, **kwargs: Any) -> LightningSegmenter:
+        seg = _segmenter(**kwargs)
+        seg.initialize()
+        seg.log = lambda *a, **k: None  # type: ignore[method-assign]
+        return seg
+
+    def test_the_training_step_accumulates_and_the_epoch_end_reports(self) -> None:
+        logged: List[Any] = []
+        seg = self._fed()
+        seg.log_dict = lambda values, *a, **k: logged.append(values)  # type: ignore[method-assign]
+
+        seg.training_step(collate_records(_records(2)), 0)
+        assert logged == [], "the training step must accumulate, not report"
+
+        seg.on_train_epoch_end()
+        assert set(logged[0]) == {"train/mean_iou", "train/dice_macro"}
+
+    def test_the_reset_is_at_epoch_START_so_the_last_epoch_survives_the_run(self) -> None:
+        """`_write_metrics_sidecar` and the `computed_metrics` @output both `compute()` AFTER
+        `trainer.fit()` has returned, so resetting at the end would hand them an emptied metric."""
+        seg = self._fed()
+        seg.log_dict = lambda *a, **k: None  # type: ignore[method-assign]
+
+        seg.training_step(collate_records(_records(2)), 0)
+        metric = seg.train_metrics["train/mean_iou"]
+        during_epoch = float(metric.compute())
+
+        seg.on_train_epoch_end()
+        assert float(metric.compute()) == pytest.approx(during_epoch), "the epoch END must not reset"
+
+        seg.on_train_epoch_start()
+        assert metric.update_count == 0, "the epoch START is what resets"
+
+    def test_a_per_class_vector_on_the_TRAIN_split_is_reported_rather_than_dropped(self) -> None:
+        """The second thing the old shape cost: it ran everything through `scalar_metrics`, so a
+        `[C]` vector wired to `train_metrics` vanished with no error at all."""
+        from torchmetrics.classification import MulticlassJaccardIndex
+
+        tracker = _RecordingTracker()
+        seg = self._fed(
+            train_metrics={"iou_per_class": LazyClass(MulticlassJaccardIndex, average=None)},
+            trackers=[tracker],
+        )
+        seg.log_dict = lambda *a, **k: None  # type: ignore[method-assign]
+
+        seg.training_step(collate_records(_records(2)), 0)
+        seg.on_train_epoch_end()
+
+        assert [name for name, _, _ in tracker.texts] == ["train/iou_per_class"]
+
+    def test_the_two_loss_series_are_unchanged(self) -> None:
+        """`train/loss` (epoch) and `train/loss_step` (batch) stay two explicit names — Lightning
+        appends `_step`/`_epoch` when ONE name carries both, and `train/loss_epoch` is a name no
+        other backend writes."""
+        names: List[str] = []
+        seg = self._fed()
+        seg.log = lambda name, *a, **k: names.append(name)  # type: ignore[method-assign]
+        seg.log_dict = lambda *a, **k: None  # type: ignore[method-assign]
+
+        seg.training_step(collate_records(_records(2)), 0)
+        assert names == ["train/loss", "train/loss_step"]
+
+
+# --------------------------------------------------------------------------- #
 # trackers: — the only output wiring, and a CONSTRUCTOR param
 # --------------------------------------------------------------------------- #
 class TestTrackers:

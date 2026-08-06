@@ -232,6 +232,16 @@ Two knobs matter here and nowhere else: **`ignore_index`** excludes a void class
 well as the loss (the segmenter's own `ignore_index` is passed to both by default), and
 **`average`** picks between one number (`"macro"`) and the per-class vector (`None`).
 
+The non-torch backends cannot take a torchmetrics template, so they name their metrics instead —
+`mean_iou`, `pixel_accuracy`, `iou_per_class`, plus whatever their own engine ships. **Those names
+resolve to the same arithmetic the torch backends get**, over a confusion matrix accumulated across
+the split and reduced once (`matrainer.metric_functions`), so a number from a hand-written loop is
+the number torchmetrics reports for the same predictions. That matters more than it sounds:
+averaging a per-batch mean IoU instead is wrong in a way that *moves with the batch size*, because
+a class absent from a batch is skipped by that batch's mean. A metric you supply as a **callable**
+keeps the per-batch protocol and is averaged, since nothing can know what your function wants
+accumulated.
+
 ### Per-split metrics
 
 `metrics:` is what every split measures; `train_metrics:` / `val_metrics:` / `test_metrics:` are
@@ -266,6 +276,24 @@ Worst-first because the scalar mean already says *how* the model is doing; what 
 *which class it is worst at*. In the run above, mean IoU 0.751 hides that the boundary ring scores
 0.48 while both real classes are above 0.85 — and `class_names:` is what makes that sentence
 readable, since a mask carries ids and there is no label map to derive names from.
+
+**Every split is scored on every backend but one**, and the exception is declared rather than
+quietly empty:
+
+| backend | how the three slots combine |
+|---|---|
+| `lightning` / `torch` / `tensorflow` / `jax` / `mlx` | each split gets its **own** set — the loop is this project's |
+| `keras` / `fastai` (fit) | the **union**: `compile()` and a fitting `Learner` each hold ONE list and report it on both passes |
+| `huggingface` | **`val` + `test` only** |
+
+The union is the honest failure where narrowing is impossible: a metric computed on a split that
+did not ask for it is noise a reader skips, where *dropping* a wired one is a metric that silently
+reports nothing. And huggingface's gap is structural — `compute_metrics` is a
+`transformers.Trainer`'s *evaluation* hook, so a training set would cost a second forward pass over
+the whole train split every epoch. Do not fill any of these by re-running the model in eval mode:
+that costs a pass **and** measures a different network (dropout, batch norm), so an expected
+train/val gap would read as a bug. The backends that own their loop score the training split from
+the logits their own gradient step already produced.
 
 ## Where results go
 
@@ -377,6 +405,86 @@ Verified end to end on the example's 256-row Oxford-Pets slice, five epochs, cha
 The Hub backend wins because it starts from real weights; the five U-Net backends start from
 noise, and their agreement with each other is the point rather than their score.
 
+### Running them all — the sweep
+
+`examples/sweep/` trains every backend this machine has, into one tracker, and prints the
+comparison:
+
+```bash
+examples/sweep/run_sweep.sh                     # every installed backend, into MLflow
+examples/sweep/run_sweep.sh --tracker csv       # ...into the always-available CSV backend
+examples/sweep/run_sweep.sh --only jax,mlx      # just those two
+examples/sweep/run_sweep.sh --dry-run           # print the matrix and the commands, run nothing
+```
+
+Every run is the same `examples/sweep/all_backends.yaml` with two flags changed. That file is an
+**overlay**: it `include:`s the example above and adds only what a sweep needs — a `--tracker`
+dimension, one metric vocabulary, and the two blocks whose paths move under `sweep_logs/`.
+
+Eleven cells, because a backend is run once per model it can take:
+
+| | zoo wrapper | shared U-Net (`--model unet`) |
+|---|---|---|
+| `lightning` / `torch` / `fastai` | `SegmentationModelPytorch` | `TorchUNet` |
+| `keras` / `tensorflow` / `jax` / `mlx` | — | `KerasUNet` / `TensorFlowUNet` / `FlaxUNet` / `MlxUNet` |
+| `huggingface` | SegFormer-b0 | — |
+
+Both gaps are structural. There is **no non-torch segmentation zoo** to wrap — which is the
+observation the [shared spec](#models--a-zoo-wrapper-and-a-shared-spec) exists to answer — and
+huggingface takes no U-Net, because a `transformers.Trainer` drives models that compute their own
+loss from `labels=`.
+
+Two things the script does that are worth knowing:
+
+- **The keras row pins `KERAS_BACKEND=tensorflow`**, and that is forced rather than a preference:
+  see the `MeanIoU` measurement below. It also makes the `keras` and `tensorflow` rows differ in
+  exactly one thing, the loop.
+- **One process per run, and failures are isolated.** Keras 3 binds its compute engine at import,
+  so `keras` and `tensorflow` cannot share an interpreter; and one backend dying must not cost the
+  other ten, since a missing row is itself a result.
+
+`matrainer.sweep` names the experiment `<date>_<N>` — counting N **from the tracker**, so a wiped
+tracker restarts at 1 — and renders the runs back. It lives in matrainer because naming and
+reading a sweep are queries against a tracker rather than anything segmentation knows about. Only `mlflow` and `csv` can be read from here;
+the rest are write surfaces locally, and the report says where to open them rather than showing an
+empty table. Timings, FLOP counts and Lightning's within-epoch `train/loss_step` series are folded
+away by default, named in the footer, and restored by `--all`:
+
+```bash
+python -m matrainer.sweep report csv Wed_Aug_5_2026_1 --all
+```
+
+Per-class vectors (`val/iou_per_class`) never reach the table at all — a `[C]` value cannot go
+through a `{name: float}` metric channel, so each backend sends it to the trackers' **text**
+channel. Read those in the tracker's own UI or in the run log, sorted worst-class first.
+
+Verified 2026-08-06, `--tracker mlflow --epochs 1` — **11/11 ok**:
+
+| run | val/loss | val/mean_iou | val/pixel_acc | train/loss | train/mean_iou | train/pixel_acc |
+|---|---|---|---|---|---|---|
+| `lightning_zoo` | 0.9045 | 0.4057 | 0.6281 | 1.1539 | 0.2462 | 0.4274 |
+| `lightning_unet` | 1.0540 | 0.2958 | 0.5544 | 1.1423 | 0.1859 | 0.3665 |
+| `torch_zoo` | 0.7243 | 0.4889 | 0.7491 | 0.9236 | 0.3613 | 0.6037 |
+| `torch_unet` | 1.0540 | 0.2958 | 0.5544 | 1.1423 | 0.1859 | 0.3665 |
+| `fastai_zoo` | 0.4784 | 0.5386 | 0.8194 | 0.6549 | 0.4478 | 0.7200 |
+| `fastai_unet` | 0.9509 | 0.3340 | 0.6431 | 1.0422 | 0.2648 | 0.4994 |
+| `keras_unet` | 0.9340 | 0.3039 | 0.6238 | 0.9078 | 0.2513 | 0.5872 |
+| `tensorflow_unet` | 0.9241 | 0.1938 | 0.5815 | 1.0075 | 0.3096 | 0.5410 |
+| `huggingface_zoo` | 0.8541 | 0.5595 | 0.8123 | 0.9624 | | |
+| `jax_unet` | 0.9756 | 0.1972 | 0.5815 | 0.9402 | 0.2996 | 0.5573 |
+| `mlx_unet` | 1.0468 | 0.1938 | 0.5815 | 0.9664 | 0.2321 | 0.5230 |
+
+Two things to read in it. **`lightning_unet` and `torch_unet` agree to four decimals on all six
+columns** — a `pl.Trainer` and a hand-written loop producing the same numbers from the same config
+is the whole claim, executed. And the two remaining blanks are structural rather than accidental:
+`compute_metrics` is a `transformers.Trainer`'s *evaluation* hook, so training metrics there would
+cost a second forward pass over the whole train split at every epoch end.
+
+Every column is one quantity computed one way — each engine's names are translated at its boundary
+and the arithmetic is shared, so `val/mean_iou` compares models rather than aggregations. The
+scores themselves are one epoch from noise on 256 rows and are not a leaderboard; what they are for
+is the two rows that agree exactly and the five U-Nets that land near each other.
+
 ### Two engine facts that will otherwise cost you an afternoon
 
 Both are upstream limits, both are measured, and neither is something this project can fix — so
@@ -396,6 +504,10 @@ The model step itself is 0.37 s, so on torch the metric is ~99.8% of the run. `K
 warns when it sees the combination; run with `KERAS_BACKEND=tensorflow` (or `jax`), or drop the IoU
 metric and keep pixel accuracy. Classification never hit this, and the asymmetry is the tell: its
 metrics are per-*image*, so the same scatter loops over 8 indices rather than 401,408.
+
+`--framework tensorflow` needs no such export — the CLI pins `KERAS_BACKEND=tensorflow` for you
+before anything imports keras, since that backend cannot run on any other engine. An explicit
+`KERAS_BACKEND=…` still wins, and is then reported as a mismatch rather than silently overridden.
 
 **SegFormer's backward pass does not run on Apple's MPS accelerator**, which `transformers.Trainer`
 selects by itself on Apple silicon. The run dies one step in with *"view size is not compatible with

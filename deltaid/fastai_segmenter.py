@@ -34,6 +34,12 @@ tag to resolve or for confluid's registry to tag. ``_as_metric`` resolves a stri
 ``fastai.metrics``, naming the module when it cannot. Do NOT add a metric-wrapper class to make
 them registrable.
 
+**One name is CONFIGURED here rather than resolved, and it is the exception that proves that
+rule:** ``pixel_accuracy`` (:class:`PixelAccuracy`). It wraps nothing — fastai has no per-pixel
+accuracy to wrap, since its ``accuracy`` argmaxes over ``axis=-1`` (the WIDTH of an
+``[N, C, H, W]`` prediction) and ``foreground_acc`` scores one class. What it supplies is the
+ACCUMULATOR, exactly as fastai's own ``DiceMulti`` does for its quantity.
+
 ``from fastai.callback import schedule`` is load-bearing: ``Learner.fit_one_cycle`` is a ``@patch``
 installed as that module's IMPORT SIDE EFFECT, and fastai's ``@patch`` returns ``None``, so
 importing the function by name binds None. Without the import, ``learn.fit_one_cycle`` falls
@@ -58,10 +64,12 @@ from fastai.callback.core import Callback as FastaiCallback
 from fastai.data.core import DataLoaders
 from fastai.learner import Learner
 from fastai.losses import CrossEntropyLossFlat
+from fastai.metrics import Metric
+from fastai.torch_core import flatten_check
 from loggair import get_logger
 from matrainer.artifacts import write_metrics_sidecar
 from matrainer.metric_names import MetricNames, as_metric_names
-from matrainer.metric_slots import merge_metric_specs
+from matrainer.metric_slots import merge_metric_specs, union_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
 from matrainer.tracking.provenance import capture_log_file, log_run_context
@@ -93,7 +101,7 @@ FastaiOptimizer = Union[str, Callable[..., Any]]
 #: The per-pixel default set — both already default to ``axis=1``, unlike the loss.
 DEFAULT_METRICS: Tuple[str, ...] = ("DiceMulti", "JaccardCoeffMulti")
 
-__all__ = ["DEFAULT_METRICS", "FastaiMetric", "FastaiOptimizer", "FastaiSegmenter", "SegmenterTask"]
+__all__ = ["DEFAULT_METRICS", "FastaiMetric", "FastaiOptimizer", "FastaiSegmenter", "PixelAccuracy", "SegmenterTask"]
 
 
 @configurable(task="segmentation", role="trainer", framework="torch")
@@ -118,10 +126,11 @@ class FastaiSegmenter(TorchRunner, ProgressReporting):
         opt_func: A ``fastai.optimizer`` function or its name (``"Adam"``, ``"SGD"``, …).
         loss: The loss. ``None`` picks ``CrossEntropyLossFlat(axis=1)`` — see the module
             docstring for why the axis is not fastai's default.
-        metrics: fastai metrics (callables or names), computed on the validation pass.
-        val_metrics / test_metrics: That split's OWN metrics, merged over ``metrics``. There is
-            no ``train_metrics``: a fastai ``Learner`` computes its metrics on the validation
-            pass only, so the slot would accept a set and silently never call it.
+        metrics: fastai metrics (callables or names), computed on both passes of a fit.
+        train_metrics / val_metrics / test_metrics: That split's OWN metrics. ``test_metrics``
+            merges over ``metrics`` and NARROWS; ``train_metrics`` and ``val_metrics`` are
+            UNIONED, because a fitting ``Learner`` holds ONE list and reports it on both passes —
+            see :meth:`_learner_metrics`.
         metric_names: How recorded metrics are named — see
             :class:`~matrainer.metric_names.MetricNames`. The ``Recorder``'s columns are
             ``train_loss`` / ``valid_loss`` / the metrics; the default translates them to the
@@ -153,6 +162,7 @@ class FastaiSegmenter(TorchRunner, ProgressReporting):
         opt_func: FastaiOptimizer = "Adam",
         loss: Optional[Lazy[Any]] = None,
         metrics: Optional[List[FastaiMetric]] = None,
+        train_metrics: Optional[List[FastaiMetric]] = None,
         val_metrics: Optional[List[FastaiMetric]] = None,
         test_metrics: Optional[List[FastaiMetric]] = None,
         metric_names: Optional[Lazy[MetricNames]] = None,
@@ -214,6 +224,11 @@ class FastaiSegmenter(TorchRunner, ProgressReporting):
         # be told apart from a user's explicit choice.
         self.loss: Optional[Lazy[Any]] = loss
         self.metrics: Optional[List[FastaiMetric]] = metrics
+        # `train_metrics` IS served — a `Recorder` takes `train_metrics=True` and then accumulates
+        # the SAME list over the training batches as they go by (see `_build_learner`). The claim
+        # this slot's absence used to rest on ("a Learner computes its metrics on the validation
+        # pass only") described fastai's DEFAULT, not a constraint.
+        self.train_metrics: Optional[List[FastaiMetric]] = train_metrics
         self.val_metrics: Optional[List[FastaiMetric]] = val_metrics
         self.test_metrics: Optional[List[FastaiMetric]] = test_metrics
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
@@ -365,9 +380,8 @@ class FastaiSegmenter(TorchRunner, ProgressReporting):
     def _build_learner(self, dataloaders: DataLoaders, split: str = "val") -> Learner:
         """Assemble the ``Learner``: model, loss, metrics, callbacks, artifact path.
 
-        ``split`` picks which metric slot is merged over the shared ``metrics`` — a ``Learner``
-        holds ONE list and computes it on the validation pass, so the split is decided by which
-        entry point is building it rather than by anything inside the Learner.
+        ``split`` says which entry point is building it, which is the only thing that can decide
+        how the metric slots combine — see :meth:`_learner_metrics`.
         """
         path = self._artifact_dir()
         learner = cast(
@@ -378,15 +392,46 @@ class FastaiSegmenter(TorchRunner, ProgressReporting):
                 model=self.model,
                 loss_func=flow(self.loss),
                 opt_func=_as_opt_func(self.opt_func),
-                metrics=[
-                    _as_metric(m) for m in (merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or [])
-                ],
+                metrics=[_as_metric(m, self.ignore_index) for m in self._learner_metrics(split)],
                 cbs=self._callbacks(),
                 path=Path(path) if path else None,
             ),
         )
+        # A `Recorder` computes its metrics on the VALIDATION pass unless told otherwise, and
+        # `train_metrics=True` makes it accumulate the SAME list over the TRAINING batches as they
+        # go by — no second pass over the data, and the numbers describe the network as it trained.
+        # Do NOT reach for a second eval-mode pass instead: it costs a pass AND measures a
+        # different network (dropout, batch norm), so an expected train/val gap would read as a bug.
+        #
+        # The columns become `train_loss, train_<m>…, valid_loss, valid_<m>…`, which is exactly the
+        # shape `matrainer.metric_names`' fastai vocabulary already reads, so nothing downstream
+        # changed when this was turned on.
+        #
+        # Set on the FIT path only: `Learner.validate()` runs no training pass, so asking for train
+        # columns there would declare names no row ever fills.
+        if split == "val":
+            learner.recorder.train_metrics = True
         self._learner = learner
         return learner
+
+    def _learner_metrics(self, split: str) -> Sequence[FastaiMetric]:
+        """The ONE metric list this Learner gets — and why the two paths combine differently.
+
+        A `Learner` holds a single ``metrics`` list and, with ``train_metrics`` on, reports it on
+        BOTH passes: `Recorder._train_mets` and `_valid_mets` are the same ``self.metrics`` with
+        different prefixes. So during a fit, ``train_metrics:`` and ``val_metrics:`` cannot be
+        narrowed apart, and the honest combination is the UNION — the same shape this project's
+        Keras backend gets from ``compile()``, and the same trade: a metric computed on a split
+        that did not ask for it is noise a reader skips, where DROPPING it would be a wired metric
+        that silently reports nothing.
+
+        The TEST path has no such constraint — it builds its own Learner and runs one pass — so it
+        keeps the narrowing merge, and a ``test_metrics:`` entry shadows the shared one by name
+        exactly as it does on the backends that own their loop.
+        """
+        if split == "test":
+            return merge_metric_specs(self.metrics, self.test_metrics) or []
+        return union_metric_specs(self.metrics, self.train_metrics, self.val_metrics) or []
 
     def _callbacks(self) -> List[Any]:
         """The wired fastai callbacks, with any file destination's parent directory created.
@@ -517,23 +562,80 @@ class FastaiSegmenter(TorchRunner, ProgressReporting):
         return dict(self._computed_metrics)
 
 
-def _as_metric(value: FastaiMetric) -> Any:
-    """A fastai metric from a callable or from its NAME in ``fastai.metrics``.
+class PixelAccuracy(Metric):
+    """Per-pixel accuracy over the NON-IGNORED pixels — the one metric fastai has no name for.
+
+    ``fastai.metrics.accuracy`` argmaxes over ``axis=-1``, which on an ``[N, C, H, W]`` prediction
+    is the WIDTH, and ``foreground_acc`` scores one class rather than all pixels. So the quantity
+    every other engine here reports as ``pixel_accuracy`` was simply unreachable by NAME — the one
+    blank column in the backend sweep's table.
+
+    **Why a CLASS when the module docstring says metrics are names.** That rule is about not
+    wrapping an upstream metric to make it registrable, and this wraps nothing: it is the
+    ACCUMULATOR fastai does not ship for this quantity. `AvgMetric(partial(accuracy, axis=1))`
+    would have been one line and averages per batch WEIGHTED BY BATCH SIZE, which is the right
+    answer only while every image contributes the same number of counted pixels — untrue the
+    moment ``ignore_index`` drops a varying number of them. Accumulating counts and dividing once
+    is exact, and it is precisely the shape fastai's own ``DiceMulti`` uses for the same reason.
+
+    The name is ``pixel_accuracy`` because that is what the other seven engines call it; a metric
+    reported under its own class name would open a column no other row fills.
+    """
+
+    def __init__(self, axis: int = 1, ignore_index: int = -100) -> None:
+        self.axis = axis
+        self.ignore_index = ignore_index
+
+    def reset(self) -> None:
+        self.correct, self.total = 0, 0
+
+    def accumulate(self, learn: Any) -> None:
+        predicted, targets = flatten_check(learn.pred.argmax(dim=self.axis), learn.y)
+        valid = targets != self.ignore_index
+        self.correct += int(((predicted == targets) & valid).sum().item())
+        self.total += int(valid.sum().item())
+
+    @property
+    def value(self) -> float:
+        return self.correct / self.total if self.total else 0.0
+
+    @property
+    def name(self) -> str:
+        return "pixel_accuracy"
+
+
+#: Metric names deltaid CONFIGURES rather than resolves from ``fastai.metrics`` — each a factory
+#: taking the segmenter's ``ignore_index``. The precedent is the classification project's
+#: ``f1_macro`` alias, and the trigger is the same: the upstream name resolves to something this
+#: task cannot use, so a bare name would either raise or report a different quantity.
+_METRIC_ALIASES: Dict[str, Callable[[int], Any]] = {
+    "pixel_accuracy": lambda ignore_index: PixelAccuracy(ignore_index=ignore_index),
+}
+
+
+def _as_metric(value: FastaiMetric, ignore_index: int = -100) -> Any:
+    """A fastai metric from a callable, a CONFIGURED ALIAS, or a NAME in ``fastai.metrics``.
 
     The string form is not sugar. ``foreground_acc`` is a plain function while ``DiceMulti`` and
     ``JaccardCoeffMulti`` are classes fastai instantiates itself (``mk_metric`` does
     ``if isinstance(m, type): m = m()``), so none of them is uniform enough for a ``!class:`` tag
     to name or for confluid's registry to tag. A name is the only thing a YAML config can write,
     so this resolves it and says which names exist when it cannot.
+
+    An ALIAS is tried first, because it exists precisely where the upstream name would resolve to
+    the wrong thing — see :class:`PixelAccuracy`.
     """
     built = flow(value)
     if not isinstance(built, str):
         return built
+    if built in _METRIC_ALIASES:
+        return _METRIC_ALIASES[built](ignore_index)
     metric = getattr(fastai_metrics, built, None)
     if metric is None:
         raise ValueError(
             f"Unknown fastai metric {built!r}. Names come from `fastai.metrics` — for segmentation: "
-            f"DiceMulti, JaccardCoeffMulti, foreground_acc, Dice, JaccardCoeff."
+            f"DiceMulti, JaccardCoeffMulti, foreground_acc, Dice, JaccardCoeff — plus deltaid's own "
+            f"{', '.join(sorted(_METRIC_ALIASES))}."
         )
     return metric
 
@@ -568,8 +670,11 @@ def _named_values(learner: Learner, values: Sequence[Any], names: MetricNames) -
     The row is then translated out of fastai's vocabulary (``names``), which is what makes this
     run's record comparable with another engine's. Two things only a fastai reader knows and the
     translation encodes: ``valid_loss`` is the validation loss, and an UNPREFIXED column is a
-    VALIDATION metric — the Recorder computes its metrics on the validation pass and prefixes
-    none of them, where every other engine's bare key is a training one.
+    VALIDATION metric, where every other engine's bare key is a training one.
+
+    An unprefixed column only appears when ``Recorder.train_metrics`` is OFF, which is the
+    ``validate()`` path — a fit turns it on (see :meth:`FastaiSegmenter._build_learner`) and the
+    columns are then ``train_<m>`` / ``valid_<m>``, which the same vocabulary already reads.
     """
     columns = _metric_names(learner)
     if len(columns) > len(values):

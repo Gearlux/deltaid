@@ -6,8 +6,8 @@ rather than inheriting it, and a divergence between copies is exactly what goes 
 rest is this engine's alone, and it is about three things:
 
 * the loss is masked by ``ignore_index`` HERE, because optax's losses take no such argument;
-* the metrics are plain ``jnp`` functions resolved by NAME, because optax ships functions and
-  there is no class for a `!class:` tag to resolve;
+* the metrics are resolved by NAME (optax ships functions, so there is no class for a
+  `!class:` tag) and ACCUMULATED over the split rather than averaged per batch;
 * the step functions are jitted ONCE and reused, because a fresh ``jit`` per epoch retraces.
 """
 
@@ -21,7 +21,7 @@ import pytest
 from confluid import LazyClass, lazy_param_names, to_pydantic
 from recordstream import Mask, collate_records
 
-from deltaid.jax_segmenter import JaxSegmenter, _iou_per_class, _mean_iou, _pixel_accuracy
+from deltaid.jax_segmenter import _METRICS, JaxSegmenter
 from deltaid.unet.flax_unet import FlaxUNet
 
 NUM_CLASSES = 3
@@ -137,54 +137,77 @@ class TestWhatTheEngineChanges:
 
 
 # --------------------------------------------------------------------------- #
-# The metrics — plain jnp functions, so they are checkable directly
+# The metrics — resolved by NAME, accumulated over the split
 # --------------------------------------------------------------------------- #
 class TestTheMetrics:
-    def _perfect(self) -> Any:
-        labels = np.array([[[0, 1], [2, 0]]])
-        logits = np.zeros((1, 2, 2, NUM_CLASSES), dtype="float32")
-        for y in range(2):
-            for x in range(2):
-                logits[0, y, x, labels[0, y, x]] = 10.0
-        return logits, labels
+    """The ARITHMETIC lives in `matrainer.metric_functions`, pinned there against torchmetrics.
 
-    def test_a_perfect_prediction_scores_one(self) -> None:
-        logits, labels = self._perfect()
-        assert float(_mean_iou(logits, labels, -100)) == pytest.approx(1.0)
-        assert float(_pixel_accuracy(logits, labels, -100)) == pytest.approx(1.0)
+    What is this backend's own — and what is checked here — is the WIRING: which names reach the
+    accumulator, that the split's matrix is what they are reduced from, and that `ignore_index`
+    travels with them.
+    """
 
-    def test_ignored_pixels_are_excluded_from_both(self) -> None:
+    def _sequence(self, seg: JaxSegmenter, rows: int) -> Any:
+        return seg._sequence(_records(rows))
+
+    def test_the_named_metrics_are_matrainers_confusion_functions(self) -> None:
+        """Not a re-implementation: the same objects the torch backends' torchmetrics agree with,
+        so a number from this loop is comparable with one from theirs."""
+        from matrainer.metric_functions import iou_per_class, mean_iou, overall_accuracy
+
+        assert _METRICS == {
+            "mean_iou": mean_iou,
+            "pixel_accuracy": overall_accuracy,
+            "iou_per_class": iou_per_class,
+        }
+
+    def test_a_named_metric_is_ACCUMULATED_and_a_callable_is_averaged(self) -> None:
+        """Partitioned by NAME, before resolution — nothing here can know what a user-supplied
+        callable would want accumulated, so only a named metric can be confusion-based."""
+        seg = _segmenter(metrics=["mean_iou", lambda logits, labels, ignore: 1.0])
+        confusion, batchwise = seg._partition_metrics("val")
+
+        assert list(confusion) == ["mean_iou"]
+        assert len(batchwise) == 1 and callable(batchwise[0])
+
+    def test_no_accumulator_is_built_when_no_named_metric_was_wired(self) -> None:
+        seg = _segmenter(metrics=[lambda logits, labels, ignore: 1.0])
+        confusion, _ = seg._partition_metrics("val")
+
+        assert seg._split_confusion(confusion) is None
+
+    def test_the_metric_does_not_depend_on_the_BATCH_SIZE(self) -> None:
+        """The property the whole change exists for, exercised through the real epoch loop.
+
+        The same model over the same rows must give ONE number however they were fed in. A
+        per-batch average cannot have it — a class absent from a batch is skipped by that batch's
+        mean, so the value moves with the batch size — and that is what made the sweep's
+        `val/mean_iou` column compare aggregations as much as models.
+        """
+        records = _records(8)
+        scores = {}
+        for size in (2, 4, 8):
+            seg = _segmenter(batch_size=size)
+            seg.initialize()
+            _, eval_step = seg._make_steps()
+            scores[size] = float(seg._run_epoch(seg._sequence(records), eval_step, seg.model)["mean_iou"])
+
+        assert len({round(value, 10) for value in scores.values()}) == 1, scores
+
+    def test_the_ignore_index_reaches_the_accumulator(self) -> None:
         """The same knob must drop the void class from the SCORE as well as the loss, or the model
-        is graded on pixels it was told to ignore."""
-        labels = np.array([[[0, 255], [255, 0]]])
-        logits = np.zeros((1, 2, 2, NUM_CLASSES), dtype="float32")
-        logits[..., 0] = 10.0
-        assert float(_pixel_accuracy(logits, labels, 255)) == pytest.approx(1.0)
-        assert float(_mean_iou(logits, labels, 255)) == pytest.approx(1.0)
+        is graded on pixels it was told to ignore. An all-void split therefore scores 0 rather
+        than dividing by zero."""
+        seg = _segmenter(ignore_index=255)
+        seg.initialize()
+        _, eval_step = seg._make_steps()
+        records = _records(2)
+        for record in records:
+            record["mask"] = Mask(np.full((SIDE, SIDE), 255, dtype=np.int64))
 
-    def test_a_class_absent_from_the_batch_is_SKIPPED_not_scored_zero(self) -> None:
-        """Scoring it 0 would drag the mean down with a class the batch never had a chance to get
-        right — which is what `MulticlassJaccardIndex` avoids too."""
-        labels = np.zeros((1, 2, 2), dtype="int64")
-        logits = np.zeros((1, 2, 2, NUM_CLASSES), dtype="float32")
-        logits[..., 0] = 10.0
-        assert float(_mean_iou(logits, labels, -100)) == pytest.approx(1.0)
-
-    def test_the_per_class_vector_reports_nan_for_an_absent_class(self) -> None:
-        """`nan` says "not present in this batch"; 0 would say "the model got this wrong"."""
-        labels = np.zeros((1, 2, 2), dtype="int64")
-        logits = np.zeros((1, 2, 2, NUM_CLASSES), dtype="float32")
-        logits[..., 0] = 10.0
-        values = np.asarray(_iou_per_class(logits, labels, -100))
-        assert values.shape == (NUM_CLASSES,)
-        assert values[0] == pytest.approx(1.0)
-        assert np.isnan(values[1]) and np.isnan(values[2])
-
-    def test_a_fully_ignored_batch_scores_zero_rather_than_dividing_by_zero(self) -> None:
-        labels = np.full((1, 2, 2), 255, dtype="int64")
-        logits = np.zeros((1, 2, 2, NUM_CLASSES), dtype="float32")
-        assert float(_pixel_accuracy(logits, labels, 255)) == 0.0
-        assert float(_mean_iou(logits, labels, 255)) == 0.0
+        values = seg._run_epoch(seg._sequence(records), eval_step, seg.model)
+        assert float(values["mean_iou"]) == 0.0
+        assert float(values["pixel_accuracy"]) == 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -203,10 +226,24 @@ class TestTheSharedContract:
         assert list(seg._split_metrics("val")) == ["mean_iou", "pixel_accuracy"]
         assert list(seg._split_metrics("test")) == ["mean_iou"]
 
-    def test_there_is_no_train_metrics_slot(self) -> None:
-        """A property of this loop rather than an omission: the training pass computes the LOSS and
-        nothing else, so a train-only metric would have nowhere to be computed."""
-        assert "train_metrics" not in inspect.signature(JaxSegmenter.__init__).parameters
+    def test_all_four_metric_slots_are_declared(self) -> None:
+        """The training pass scores too. What used to be described as a property of JAX was a
+        property of the loop as written: the step returns its logits as an aux output, so a
+        training metric costs ONE reduction per batch and no second forward pass."""
+        params = inspect.signature(JaxSegmenter.__init__).parameters
+        assert {"metrics", "train_metrics", "val_metrics", "test_metrics"} <= set(params)
+        assert list(_segmenter(metrics=["mean_iou"], train_metrics=["pixel_accuracy"])._split_metrics("train")) == [
+            "mean_iou",
+            "pixel_accuracy",
+        ]
+
+    def test_the_train_step_returns_the_logits_it_took_the_gradient_through(self) -> None:
+        """`has_aux`, so the training metrics measure the network AS IT TRAINED. Re-running the
+        model in eval mode would cost a pass AND measure a different network (dropout, batch
+        norm), so an expected train/val gap would read as a bug."""
+        source = inspect.getsource(JaxSegmenter._make_steps)
+        assert "has_aux=True" in source
+        assert "return loss, logits" in source
 
     def test_the_entrypoint_markers_are_the_dispatch_table(self) -> None:
         from recordstream.runnable import runnable_entrypoints

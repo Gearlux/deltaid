@@ -16,6 +16,7 @@ declares, with no verb at all.)
 Adding a backend: write ``deltaid/<name>_segmenter.py``, then add a row to ``FRAMEWORKS`` below.
 """
 
+import os
 import sys
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
@@ -156,6 +157,35 @@ def frameworks() -> None:
     )
 
 
+def _pin_keras_backend(framework: Optional[str]) -> None:
+    """``--framework tensorflow`` must pin ``KERAS_BACKEND`` before ANYTHING imports keras.
+
+    Keras 3 reads the variable once, at import time, and ``recordstream.keras`` defaults it to the
+    first backend INSTALLED — torch, on any machine that also carries ``deltaid[lightning]``. A
+    torch-backed ``keras.Model`` cannot be trained with ``tf.GradientTape``, so the default has to
+    be overridden for this backend.
+
+    It happens HERE, in ``main()``, and it must run BEFORE :func:`_register_segmentation`, which is
+    what made the omission bite: ``FRAMEWORKS["tensorflow"].registrations`` names
+    ``deltaid.keras_segmentation`` (there is deliberately no second loss module — ``tf.keras`` IS
+    Keras 3), so registering imports ``deltaid._keras`` -> ``recordstream.keras`` and the torch
+    default is already bound by the time :mod:`deltaid._tensorflow` sets its own. Every
+    ``deltaid train --framework tensorflow`` then died at ``_require_tensorflow_backend()`` with
+    *"needs Keras on the TensorFlow engine, but keras loaded the 'torch' one"* — the message names
+    the fix, but the CLI knows the answer and can just do it (measured on the backend sweep, which
+    is where a backend nobody had run since the CLI grew its registration step surfaced).
+
+    :mod:`deltaid._tensorflow` sets the same default as a second line of defence for callers that
+    never go through this CLI (``recordstream run cfg.yaml --framework tensorflow``), and
+    ``TensorFlowSegmenter`` refuses to run on the wrong engine either way.
+
+    ``setdefault``, so an explicit ``KERAS_BACKEND=…`` still wins and is then reported as a
+    mismatch instead of being silently overridden.
+    """
+    if framework == "tensorflow":
+        os.environ.setdefault("KERAS_BACKEND", "tensorflow")
+
+
 def _register_segmentation(framework: Optional[str]) -> None:
     """Import a backend's loss/metric registrations so a config may NAME them.
 
@@ -236,6 +266,7 @@ def _requested_framework(argv: List[str]) -> Optional[str]:
 
 def main() -> None:
     framework = _requested_framework(sys.argv)
+    _pin_keras_backend(framework)  # BEFORE the registration import — see that function
     _register_segmentation(framework)
     _normalize_framework_flag(sys.argv)
     app.run()

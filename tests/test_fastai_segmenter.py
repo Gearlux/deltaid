@@ -21,7 +21,13 @@ from recordstream import Mask
 
 fastai = pytest.importorskip("fastai")
 
-from deltaid.fastai_segmenter import DEFAULT_METRICS, FastaiSegmenter, _as_metric, _as_opt_func  # noqa: E402
+from deltaid.fastai_segmenter import (  # noqa: E402
+    DEFAULT_METRICS,
+    FastaiSegmenter,
+    PixelAccuracy,
+    _as_metric,
+    _as_opt_func,
+)
 
 NUM_CLASSES = 3
 SIDE = 32
@@ -128,6 +134,88 @@ class TestTheFastaiFacts:
 
 
 # --------------------------------------------------------------------------- #
+# `pixel_accuracy` — the one name deltaid CONFIGURES rather than resolves
+# --------------------------------------------------------------------------- #
+class TestPixelAccuracy:
+    """fastai has no per-pixel accuracy reachable by name, which was the one blank column in the
+    backend sweep's table. `accuracy` argmaxes over `axis=-1` — the WIDTH of an `[N, C, H, W]`
+    prediction — and `foreground_acc` scores one class rather than all pixels."""
+
+    def _accumulate(self, metric: PixelAccuracy, predictions: torch.Tensor, targets: torch.Tensor) -> None:
+        metric.accumulate(type("L", (), {"pred": predictions, "y": targets})())
+
+    def _perfect_predictions(self, targets: torch.Tensor) -> torch.Tensor:
+        predictions = torch.zeros(targets.shape[0], NUM_CLASSES, *targets.shape[1:])
+        for index in range(NUM_CLASSES):
+            predictions[:, index][targets == index] = 10.0
+        return predictions
+
+    def test_the_alias_resolves_and_carries_the_segmenters_ignore_index(self) -> None:
+        metric = _as_metric("pixel_accuracy", 255)
+
+        assert isinstance(metric, PixelAccuracy)
+        assert metric.ignore_index == 255
+        assert metric.name == "pixel_accuracy", "the column must be the one every other engine fills"
+
+    def test_a_perfect_prediction_scores_one(self) -> None:
+        targets = torch.randint(0, NUM_CLASSES, (2, 4, 4))
+        metric = PixelAccuracy()
+        metric.reset()
+        self._accumulate(metric, self._perfect_predictions(targets), targets)
+
+        assert metric.value == pytest.approx(1.0)
+
+    def test_ignored_pixels_are_excluded_from_the_score(self) -> None:
+        """The same knob must drop the void class from the SCORE as well as the loss."""
+        targets = torch.zeros(1, 2, 2, dtype=torch.int64)
+        targets[0, 0] = 255  # half the image is void, and predicted WRONG
+        predictions = torch.zeros(1, NUM_CLASSES, 2, 2)
+        predictions[0, 0] = 10.0
+
+        metric = PixelAccuracy(ignore_index=255)
+        metric.reset()
+        self._accumulate(metric, predictions, targets)
+
+        assert metric.value == pytest.approx(1.0), "the void half must not be scored"
+
+    def test_it_ACCUMULATES_rather_than_averaging_the_batches(self) -> None:
+        """The reason this is a `Metric` and not `AvgMetric(partial(accuracy, axis=1))`: fastai
+        weights a per-batch average by BATCH SIZE, which is right only while every image
+        contributes the same number of counted pixels — untrue the moment `ignore_index` drops a
+        varying number of them.
+
+        Here batch 1 is all-valid and batch 2 is three-quarters void, so a batch-size-weighted
+        average of the two batch scores (1.0 and 0.0 -> 0.5) differs from the true fraction of
+        correct counted pixels (4 of 5 -> 0.8).
+        """
+        metric = PixelAccuracy(ignore_index=255)
+        metric.reset()
+
+        first = torch.zeros(1, 2, 2, dtype=torch.int64)
+        self._accumulate(metric, self._perfect_predictions(first), first)
+
+        second = torch.full((1, 2, 2), 255, dtype=torch.int64)
+        second[0, 0, 0] = 1  # one valid pixel, predicted class 0 -> wrong
+        wrong = torch.zeros(1, NUM_CLASSES, 2, 2)
+        wrong[0, 0] = 10.0
+        self._accumulate(metric, wrong, second)
+
+        assert metric.value == pytest.approx(4 / 5)
+
+    def test_an_all_void_split_scores_zero_rather_than_dividing_by_zero(self) -> None:
+        metric = PixelAccuracy(ignore_index=255)
+        metric.reset()
+        targets = torch.full((1, 2, 2), 255, dtype=torch.int64)
+        self._accumulate(metric, torch.zeros(1, NUM_CLASSES, 2, 2), targets)
+
+        assert metric.value == 0.0
+
+    def test_an_unknown_name_lists_the_aliases_too(self) -> None:
+        with pytest.raises(ValueError, match="pixel_accuracy"):
+            _as_metric("NotAMetric")
+
+
+# --------------------------------------------------------------------------- #
 # The fork hazard — this backend is the reason it was found
 # --------------------------------------------------------------------------- #
 class TestForkSafety:
@@ -183,13 +271,32 @@ class TestParity:
         with pytest.raises(TypeError, match="must be a torch.nn.Module"):
             seg.initialize()
 
-    def test_there_is_no_train_metrics_slot(self) -> None:
-        """A `Learner` computes its metrics on the VALIDATION pass only, so a `train_metrics`
-        param would accept a wired set and silently never call it — the exact failure the
-        per-split slots exist to remove."""
+    def test_all_four_metric_slots_are_declared(self) -> None:
+        """`train_metrics` IS served. The claim its absence rested on — "a `Learner` computes its
+        metrics on the validation pass only" — described fastai's DEFAULT rather than a
+        constraint: `Recorder.__init__` takes `train_metrics`, and `_build_learner` turns it on
+        for a fit."""
         params = inspect.signature(FastaiSegmenter.__init__).parameters
-        assert "train_metrics" not in params
-        assert {"metrics", "val_metrics", "test_metrics"} <= set(params)
+        assert {"metrics", "train_metrics", "val_metrics", "test_metrics"} <= set(params)
+
+    def test_the_fit_path_turns_the_recorder_train_columns_ON(self) -> None:
+        """It accumulates the SAME list over the training batches as they go by — no second pass,
+        and the numbers describe the network as it trained. Only on the fit path:
+        `Learner.validate()` runs no training pass, so train columns there would name rows nobody
+        fills."""
+        source = inspect.getsource(FastaiSegmenter._build_learner)
+        assert 'if split == "val":' in source
+        assert "learner.recorder.train_metrics = True" in source
+
+    def test_a_fit_UNIONS_the_train_and_val_slots_while_test_NARROWS(self) -> None:
+        """One `Learner`, one metric list, reported on both passes — so during a fit the two slots
+        cannot be told apart and widening is the honest answer (a metric computed where it was not
+        asked for is noise; dropping a wired one is a bug nobody can see). The test path builds its
+        own Learner and runs one pass, so it keeps the narrowing merge."""
+        seg = _segmenter(metrics=["DiceMulti"], train_metrics=["foreground_acc"], test_metrics=["JaccardCoeffMulti"])
+
+        assert list(seg._learner_metrics("val")) == ["DiceMulti", "foreground_acc"]
+        assert list(seg._learner_metrics("test")) == ["DiceMulti", "JaccardCoeffMulti"]
 
     def test_it_uses_the_shared_combination_rule(self) -> None:
         assert "from matrainer.metric_slots import" in Path(inspect.getfile(FastaiSegmenter)).read_text()
