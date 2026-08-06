@@ -269,14 +269,33 @@ class LightningSegmenter(TorchRunner, ProgressReporting, L.LightningModule):
         self.log("train/loss", loss, on_step=False, on_epoch=True, batch_size=x.shape[0])
         self.log("train/loss_step", loss, on_step=True, on_epoch=False, prog_bar=True, batch_size=x.shape[0])
         if isinstance(self.train_metrics, MetricCollection):
-            # The per-BATCH values, SCALARS only — `log_dict` reduces every logged value through
-            # Lightning's `convert_tensors_to_scalars`, which raises on a non-scalar metric.
-            self.log_dict(scalar_metrics(self.train_metrics(preds, y)), on_step=True, on_epoch=False)
+            # UPDATE only — the reduction happens once in `on_train_epoch_end`, exactly as it does
+            # for the eval splits. This used to log the per-BATCH values with `on_step=True`, which
+            # was wrong in two ways that only a comparison makes visible:
+            #
+            #  * Lightning's `log_every_n_steps` (50 by default) DROPS a per-step series shorter
+            #    than the interval, so a run of 32 steps recorded no training metric AT ALL —
+            #    measured on the backend sweep at `--epochs 1`: `lightning_zoo` and
+            #    `lightning_unet` wrote `train/loss` and nothing else, while `torch_zoo` /
+            #    `torch_unet` wrote `train/mean_iou` + `train/pixel_accuracy` on the same config.
+            #  * What survived a longer run was ONE BATCH's value rather than the epoch's, so the
+            #    two columns of a cross-framework table were not measuring the same thing.
+            #
+            # It also makes a non-scalar metric wirable on this split: the old call ran everything
+            # through `scalar_metrics` and DROPPED a per-class vector silently, where
+            # `_report_epoch_metrics` sends it to the text channel like any other split's.
+            self.train_metrics.update(preds, y)
         return loss
 
-    def on_train_epoch_end(self) -> None:
+    def on_train_epoch_start(self) -> None:
+        # Reset at epoch START, matching the eval splits: the LAST epoch's state has to survive the
+        # run, because `_write_metrics_sidecar` and the `computed_metrics` @output both `compute()`
+        # after `trainer.fit()` has already returned.
         if isinstance(self.train_metrics, MetricCollection):
             self.train_metrics.reset()
+
+    def on_train_epoch_end(self) -> None:
+        self._report_epoch_metrics(self.train_metrics)
 
     def validation_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
         self._resolve_task_defaults()  # no-op once resolved; keeps a directly-called step working

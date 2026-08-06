@@ -6,13 +6,23 @@ YAML once per declared scope — so a block that drops a slot fails on the machi
 the mistake, rather than only where that backend's framework happens to be installed.
 """
 
+import inspect
+import os
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 import confluid
 import pytest
 
-from deltaid.cli import FRAMEWORKS, VERB_TASKS, _normalize_framework_flag, _requested_framework, app
+from deltaid.cli import (
+    FRAMEWORKS,
+    VERB_TASKS,
+    _normalize_framework_flag,
+    _pin_keras_backend,
+    _requested_framework,
+    app,
+    main,
+)
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "train_unet_oxford_pets.yaml"
 
@@ -142,3 +152,51 @@ def test_every_framework_names_registrations_that_import() -> None:
         if spec.registrations is None:
             continue
         importlib.import_module(spec.registrations)  # raises if the path is wrong
+
+
+# --------------------------------------------------------------------------- #
+# The engine `--framework tensorflow` cannot run without
+# --------------------------------------------------------------------------- #
+def test_the_tensorflow_backend_pins_the_keras_engine_before_anything_imports_keras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keras 3 reads `KERAS_BACKEND` ONCE, at import, and the default here is the wrong one.
+
+    `recordstream.keras` defaults it to the first engine INSTALLED, which is torch on any machine
+    that also carries `deltaid[lightning]` — and a torch-backed `keras.Model` cannot be trained
+    with `tf.GradientTape`. Without this step EVERY `deltaid train --framework tensorflow` died at
+    `_require_tensorflow_backend()`, because `_register_segmentation` imports
+    `deltaid.keras_segmentation` (there is deliberately no second loss module) and binds the torch
+    default before `deltaid._tensorflow` gets to set its own.
+    """
+    monkeypatch.delenv("KERAS_BACKEND", raising=False)
+    _pin_keras_backend(_requested_framework(["deltaid", "train", "c.yaml", "--framework", "tensorflow"]))
+
+    assert os.environ.get("KERAS_BACKEND") == "tensorflow"
+
+
+def test_an_explicit_keras_backend_is_never_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`setdefault`, so a deliberate choice survives and the segmenter reports the mismatch."""
+    monkeypatch.setenv("KERAS_BACKEND", "jax")
+    _pin_keras_backend("tensorflow")
+
+    assert os.environ["KERAS_BACKEND"] == "jax"
+
+
+@pytest.mark.parametrize("framework", ["lightning", "torch", "keras", "fastai", "jax", "mlx", "huggingface", None])
+def test_no_other_framework_touches_keras_backend(monkeypatch: pytest.MonkeyPatch, framework: Any) -> None:
+    """`keras` included: it runs on whichever engine is loaded, which is the whole point of it."""
+    monkeypatch.delenv("KERAS_BACKEND", raising=False)
+    _pin_keras_backend(framework)
+
+    assert "KERAS_BACKEND" not in os.environ
+
+
+def test_the_pin_runs_before_the_registration_import() -> None:
+    """Order is the whole fix: the registration import is what binds the wrong engine.
+
+    Read from the SOURCE of `main()` rather than by calling it — calling it would run the app.
+    """
+    source = inspect.getsource(main)
+
+    assert source.index("_pin_keras_backend") < source.index("_register_segmentation")

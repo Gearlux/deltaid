@@ -592,3 +592,221 @@ metric_names: !class:matrainer.MetricNames     # optional; the default is <split
 `tests/test_tracking_parity.py`. Do NOT translate a name the user wrote in a config, and do not
 push the translation into `Tracker.log_metrics`: a tracker cannot know which engine or which
 split produced a bare key.
+
+## 12. The sweep is an overlay, and the model is a second dimension (2026-08-05)
+
+**Context.** Records 7 and 11 made eight backends run one config and record one vocabulary, and
+record 6 made five frameworks implement one U-Net. Both claims were checked the same way: one
+backend at a time, by hand, with the numbers pasted into `AGENTS.md`. Nothing ran them *together*,
+so nothing could see the things only a comparison shows — a metric under two names, a column one
+engine leaves blank, a block that resolves to the wrong runnable under the right name.
+
+The obvious way to get one is a second config with every backend written out. That is the thing to
+avoid: it duplicates the dataset, the trimap handling, the joint resize and every framework block,
+and the copy drifts from the example the moment either is edited.
+
+**Decision.** `examples/sweep/` is an OVERLAY plus a driver.
+
+- `all_backends.yaml` `include:`s the example and overrides only what a sweep needs: a `tracker`
+  dimension whose blocks take their names from the run through `!ref:`, one metric vocabulary, and
+  the two blocks whose output paths move under `sweep_logs/`.
+- The **model becomes a dimension**, `!scope:model=unet`, and that block lives in the EXAMPLE
+  rather than here — making the shared spec reachable is worth having on a default checkout, not
+  only under a sweep. It is what lets the three torch backends train the same 488,739 parameters
+  the other five already do.
+- `run_sweep.sh` walks the eleven cells one SUBPROCESS at a time and isolates failures.
+- `matrainer.sweep` names the experiment `<date>_<N>` — N counted from the TRACKER — and renders
+  the runs back. It is matrainer's rather than this project's: both halves are queries against a
+  tracker, and three task projects held byte-identical copies before the lift.
+
+**Consequences.**
+
+- Three composition rules are load-bearing, and each was measured while building it. (1) A scope
+  block REPLACES rather than merges, because `include:` deep-merges *mappings* and a `!scope:`
+  parses to a `ScopeBlock` — so a block restating one key discards the runnable and the model with
+  it. (2) A deep-merged key keeps its ORIGINAL POSITION, so a key only the overlay introduces is
+  appended at the end and wins over any block the example already declared — which silently
+  replaced the fastai block's metric list with a torchmetrics mapping until it moved into the
+  runnable's constructor kwargs, where a broadcast cannot reach it. (3) The five non-torch blocks
+  need no nested `unet:` block: each wires its implementation unconditionally and is spliced after
+  the example's top-level one.
+- **The keras row pins `KERAS_BACKEND=tensorflow`**, and record 9's neighbour is why: on the torch
+  engine `keras.metrics.MeanIoU` scatters per PIXEL through a Python loop (~160 s per batch against
+  a 0.37 s model step), so an unpinned keras row does not look slow, it looks hung. Pinning also
+  leaves the `keras` and `tensorflow` rows differing in exactly one thing, the loop.
+- **`num_workers` is NOT dropped to 0** for the sweep, unlike its classification counterpart:
+  record 8's fork hazard lives in a DataLoader worker, and a single-process sweep would stop
+  exercising the one path whose failure is a SIGSEGV with no traceback.
+- What the sweep exposed immediately is what it is for: fastai names mean IoU `jaccard_coeff_multi`
+  (carried into the shared column by `metric_names.renames`, since it is an engine-generated name),
+  has no pixel accuracy reachable by name, and four backends compute no training metrics at all.
+  The first is fixed, the other two are declared in `TASKS.md` rather than hidden by trimming the
+  table.
+- The tests are CONFIG-level (`tests/test_sweep_config.py`), for `test_cli_frameworks.py`'s reason:
+  a machine need not carry all eight frameworks, so an import-based check would silently reduce to
+  whichever extras are installed — exactly where a copy-pasted block lands.
+
+**Example.**
+
+```bash
+examples/sweep/run_sweep.sh --tracker csv --epochs 1
+# ==> lightning_zoo    ok   (56s)
+# ==> lightning_unet   ok   (62s)
+# ...
+# Wed_Aug_5_2026_2 — 11 ok, 0 failed
+#
+# | run            | val/loss | val/mean_iou | val/pixel_acc | train/loss | train/mean_iou |
+# | lightning_unet |   1.0540 |       0.2958 |        0.5544 |     1.1423 |         0.1859 |
+# | torch_unet     |   1.0540 |       0.2958 |        0.5544 |     1.1423 |         0.1859 |  <- the claim
+```
+
+```yaml
+# the whole of what the overlay adds for one tracker
+csv: !scope:tracker=csv
+  trackers:
+    - !class:matrainer.CsvTracker
+      experiment_name: !ref:experiment_name    # never a literal — it would drift from the run
+      run_name: !ref:run_name
+      save_dir: ./sweep_logs/csv
+```
+
+**What you may change.** A ninth backend adds a row to `MATRIX` in `tests/test_sweep_config.py`
+(which asserts the matrix covers every backend the CLI advertises) and an entry to `BACKENDS` in
+the driver, naming its import probes and any environment it must pin. Wire an engine-specific
+metric when you want to look at THAT backend; leave it out when you want to compare backends — the
+REPORT renders the union either way, and a column one engine fills is honest where a silently
+dropped one is not. Do NOT resolve a ragged column by making the report hide it.
+
+## 13. Every split is scored, and where that is not free (2026-08-05)
+
+**Context.** Record 12's sweep put the eight backends' numbers in one table, and the training
+columns were mostly empty: four backends declared no `train_metrics` slot at all, and the one that
+did — Lightning — recorded nothing on a short run. Each absence had a sentence in the code
+explaining it, and three of the four sentences were wrong in the same way: they described THIS
+PROJECT'S LOOP and read as though they described the engine.
+
+* *"the training pass computes the LOSS and nothing else"* (JAX, MLX) — true of the loop as
+  written. `nnx.value_and_grad` takes `has_aux=True`, and MLX differentiates the FIRST element of a
+  returned tuple, so the logits the gradient was already taken through can simply come back beside
+  the loss.
+* *"a `Learner` computes its metrics on the validation pass only"* (fastai) — fastai's DEFAULT.
+  `Recorder.__init__` takes `train_metrics=False`.
+* Lightning's was not a sentence but a shape: `training_step` logged the per-BATCH values with
+  `on_step=True`, and `log_every_n_steps` (50) drops a series shorter than the interval.
+
+**Decision.** All eight backends serve the per-split slots, in three groups, and the group each
+belongs to is a property of its ENGINE rather than of this project:
+
+| group | backends | why |
+|---|---|---|
+| each split separate | `lightning`, `torch`, `tensorflow`, `jax`, `mlx` | the loop is ours |
+| the union | `keras`, `fastai` (fit) | ONE compiled metric list, reported on both passes |
+| `val` + `test` only | `huggingface` | `compute_metrics` is an EVALUATION hook |
+
+The training metrics are scored from the logits the gradient step already produced. **Never from a
+second eval-mode pass**: that costs a forward pass AND measures a different network (dropout, batch
+norm), so a train/val gap that is expected would read as a bug.
+
+**Consequences.**
+
+- `LightningSegmenter.training_step` UPDATES only; `on_train_epoch_start` resets and
+  `on_train_epoch_end` reports, mirroring the eval hooks. That also makes a per-class VECTOR
+  wirable on the train split — the old shape ran everything through `scalar_metrics` and dropped
+  one silently.
+- The union is the honest failure when narrowing is impossible. Dropping a wired metric is a bug
+  nobody can see; computing one where it was not asked for is noise a reader skips.
+- fastai's fit path turns `Recorder.train_metrics` on, which changes its columns to
+  `train_<m>` / `valid_<m>` — the shape `matrainer.metric_names`' fastai vocabulary already read,
+  so nothing downstream changed. An UNPREFIXED column now means the `validate()` path.
+- What this does NOT fix is how each engine AGGREGATES: torchmetrics accumulates over the split
+  while the hand-written loops average per batch, so a mean IoU is not the same number on both.
+  The training columns deliberately take the same per-batch mean their own eval pass takes, so each
+  row stays internally consistent; making the ROWS comparable is `TASKS.md`'s.
+
+**Example.**
+
+```yaml
+metrics:                       # every split
+  mean_iou: !lazy:torchmetrics.classification.MulticlassJaccardIndex { average: macro }
+val_metrics:                   # validation only — and on keras/fastai, widened to training too
+  iou_per_class: !lazy:torchmetrics.classification.MulticlassJaccardIndex { average: null }
+```
+
+```python
+# jax / mlx: the logits ride out of the gradient step, so the metric costs one reduction
+(loss, logits), grads = nnx.value_and_grad(forward, has_aux=True)(model)
+```
+
+**What you may change.** A ninth backend declares all four slots and picks its group by what its
+engine can honour — then says so in its constructor docstring, because an undeclared group is what
+this record exists to stop. Do not offer a slot the engine cannot compute: accepting a wired set
+and silently never calling it is the exact failure the per-split slots exist to remove.
+
+## 14. One aggregation across eight engines (2026-08-05)
+
+**Context.** Record 13 filled the training columns, which made a second problem legible in the
+same table: the eight backends did not agree on how a metric is AGGREGATED over a split.
+`lightning` / `torch` compute theirs with torchmetrics, which accumulates across batches and
+reduces once. `jax` and `mlx` computed a value per batch and averaged the batches. For mean IoU
+those are not the same number, and the error is not even consistently signed — a class absent from
+a batch is SKIPPED by that batch's mean rather than scored 0, so batches with fewer classes present
+are over-weighted, and the result moves with the batch size (10 classes at accuracy 0.7 against an
+exact 0.5922: 0.6164 at batch 4, 0.5798 at batch 32).
+
+So the sweep's `val/mean_iou` column carried a difference that was nothing to do with the models —
+the one thing a cross-framework table must not do.
+
+**How big it actually was here is worth recording, because it is small and that is not
+reassuring.** Measured on this example's 64-row validation split through the real JAX loop:
+accumulated 0.104803, batch-averaged 0.104790 — a delta of 1.4e-5. Eight batches of eight
+224x224 images each contain all three classes in similar proportions, so the per-batch means
+average to very nearly the global value. The gap only opens when batches DIFFER in which classes
+they hold, which is the ordinary case with more classes, smaller batches, or sparse ones — and
+nothing about the config tells a reader which regime they are in. A difference that is invisible on
+the data you happen to have and material on the data you move to is exactly the kind worth removing
+structurally rather than measuring per dataset.
+
+**Decision.** Every backend that owns its loop accumulates a `C×C` confusion matrix per split and
+reduces ONCE, using `matrainer.metric_functions` — the module the classification task already
+brought up for macro-F1, extended with `overall_accuracy` / `iou_per_class` / `mean_iou` and an
+`ignore_index` on the accumulator. The private numpy / `jnp` / `mx` implementations are deleted.
+
+The partition is by NAME and happens BEFORE resolution: only a named metric can be
+confusion-based, because nothing here can know what a user-supplied callable would want
+accumulated — one keeps the `(logits, labels, ignore_index)` protocol and its per-batch mean.
+
+**Consequences.**
+
+- `jax` and `mlx` change their numbers; this is a fix. **`huggingface` does not, and that
+  distinction is worth keeping rather than flattening:** `batch_eval_metrics` is False by default,
+  so a `Trainer` gathers the whole split and calls `compute_metrics` once (verified), and its
+  hand-written numpy agreed with the shared functions to ten decimals on real arrays. What the swap
+  buys there is that two implementations cannot drift, plus `iou_per_class` — the per-class vector
+  its own registry never had.
+- **One line is engine-specific and silent when wrong.** `accumulate_confusion` argmaxes the LAST
+  axis, so the huggingface backend moves its `[N, C, H, W]` channel axis first. Getting it wrong
+  scores the model against its own WIDTH: a plausible number, no error. Pinned with a non-square
+  map, because `H == W` would still run.
+- The property the tests pin is **batch-size independence** — the same model over the same rows at
+  two batch sizes must give one number — driven through the real epoch loop rather than by
+  restating the arithmetic, which would pass just as happily if code and test were wrong the same
+  way. The arithmetic's agreement with torchmetrics is matrainer's to pin.
+- The torch backends were always right, which is what makes them the reference the other five now
+  match rather than a sixth opinion.
+
+**Example.**
+
+```python
+confusion, batchwise = self._partition_metrics(split)      # by NAME, before resolution
+matrix = self._split_confusion(confusion)                  # None when nothing named was wired
+for batch in split:
+    ...
+    accumulate_confusion(matrix, logits, labels, self.ignore_index)
+values = {name: reduce(matrix) for name, reduce in confusion.items()}   # ONCE
+```
+
+**What you may change.** A new named metric is an entry in the backend's `_METRICS` and a reduction
+in `matrainer.metric_functions` — never a per-batch function averaged by the loop. If a metric
+genuinely cannot come from a confusion matrix, it stays a callable and is batch-averaged, and that
+is a fact about the metric rather than a shortcut. Do NOT "optimise" the accumulation by keeping a
+running mean of per-batch values: that is the defect this record exists to close.

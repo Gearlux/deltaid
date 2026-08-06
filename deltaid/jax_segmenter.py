@@ -18,8 +18,9 @@ programming models:
 
 Everything else is shared and reused, not rewritten: the record stream, the fork guard, the
 predictions sink and contract, ``write_metrics_sidecar``, and the ``@entrypoint`` dispatch. What
-is written here is :meth:`JaxSegmenter._to_arrays` (the batch shape), the step functions, the
-epoch loop, and two per-pixel metrics.
+is written here is :meth:`JaxSegmenter._to_arrays` (the batch shape), the step functions and the
+epoch loop. The METRICS are not written here either: the named ones are
+:mod:`matrainer.metric_functions`' reductions over a confusion matrix this loop accumulates.
 
 **Channels-LAST**, like the Keras and TensorFlow backends: the image arrives ``[N, H, W, C]``, so
 a JAX run's ``preprocess`` chain stops after the joint albumentations resize rather than adding
@@ -49,6 +50,7 @@ from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from flax import nnx
 from loggair import get_logger
 from matrainer.artifacts import write_metrics_sidecar
+from matrainer.metric_functions import accumulate_confusion, iou_per_class, mean_iou, overall_accuracy, zero_confusion
 from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
@@ -89,73 +91,29 @@ __all__ = ["EpochCallback", "JaxLoss", "JaxMetric", "JaxOptimizer", "JaxSegmente
 
 
 def _valid_mask(labels: Any, ignore_index: int) -> Any:
-    """The pixels that count — everything except the void class."""
+    """The pixels that count — everything except the void class.
+
+    The LOSS's helper. The metrics need no equivalent since they moved onto the confusion matrix:
+    ``accumulate_confusion`` takes ``ignore_index`` and drops those positions before counting.
+    """
     return labels != ignore_index
 
 
-def _pixel_accuracy(logits: Any, labels: Any, ignore_index: int) -> Any:
-    """Fraction of NON-IGNORED pixels whose argmax matches the label.
-
-    The channel axis is LAST here (``[N, H, W, C]``), which is the one line that differs from the
-    torch backends' equivalent.
-    """
-    valid = _valid_mask(labels, ignore_index)
-    correct = (jnp.argmax(logits, axis=-1) == labels) & valid
-    total = jnp.sum(valid)
-    return jnp.where(total > 0, jnp.sum(correct) / jnp.maximum(total, 1), 0.0)
-
-
-def _mean_iou(logits: Any, labels: Any, ignore_index: int) -> Any:
-    """Mean intersection-over-union over the classes PRESENT in this batch.
-
-    Classes absent from both the prediction and the label are skipped rather than scored 0 —
-    scoring them would drag the mean down with classes the batch never had a chance to get right,
-    which is what ``MulticlassJaccardIndex`` does too.
-
-    Written with a fixed-size ``jnp`` reduction rather than a Python loop over present classes, so
-    the whole thing stays traceable by ``jit``: a data-dependent loop would force a retrace per
-    batch, or fail outright inside one.
-    """
-    valid = _valid_mask(labels, ignore_index)
-    predicted = jnp.argmax(logits, axis=-1)
-    classes = jnp.arange(logits.shape[-1])
-
-    def per_class(class_id: Any) -> Any:
-        pred_c = (predicted == class_id) & valid
-        true_c = (labels == class_id) & valid
-        union = jnp.sum(pred_c | true_c)
-        return jnp.sum(pred_c & true_c) / jnp.maximum(union, 1), union > 0
-
-    ious, present = jax.vmap(per_class)(classes)
-    return jnp.where(jnp.any(present), jnp.sum(jnp.where(present, ious, 0.0)) / jnp.maximum(jnp.sum(present), 1), 0.0)
-
-
-def _iou_per_class(logits: Any, labels: Any, ignore_index: int) -> Any:
-    """One IoU per class — the ``[C]`` VECTOR a segmentation report actually wants.
-
-    An absent class scores ``nan`` rather than 0, so the per-class table says "not present in this
-    batch" instead of "the model got this wrong". `render_vector_as_table` prints it as ``nan``,
-    which is the honest answer.
-    """
-    valid = _valid_mask(labels, ignore_index)
-    predicted = jnp.argmax(logits, axis=-1)
-    classes = jnp.arange(logits.shape[-1])
-
-    def per_class(class_id: Any) -> Any:
-        pred_c = (predicted == class_id) & valid
-        true_c = (labels == class_id) & valid
-        union = jnp.sum(pred_c | true_c)
-        return jnp.where(union > 0, jnp.sum(pred_c & true_c) / jnp.maximum(union, 1), jnp.nan)
-
-    return jax.vmap(per_class)(classes)
-
-
-#: Metric NAMES this backend resolves. Plain functions, so there is nothing for confluid to tag —
-#: see the module docstring. Each takes ``(logits, labels, ignore_index)``.
-_METRICS: Dict[str, Callable[..., Any]] = {
-    "mean_iou": _mean_iou,
-    "pixel_accuracy": _pixel_accuracy,
-    "iou_per_class": _iou_per_class,
+#: Metric NAMES this backend resolves — each derived from the split's CONFUSION MATRIX rather than
+#: computed per batch and averaged, so a number here is the number ``torchmetrics`` reports for the
+#: same predictions and the sweep's columns compare models rather than aggregations.
+#:
+#: The arithmetic is ``matrainer.metric_functions``' and not written out here for the
+#: ``metric_slots`` reason one layer up: three engines in this project need it identically, and the
+#: alternative is the same twenty lines copied into each. What was written here before — a jitted
+#: ``jax.vmap`` per-class reduction — was correct FOR ONE BATCH and wrong once averaged over an
+#: epoch, which is the failure that module exists to name.
+#:
+#: Plain functions, so there is nothing for confluid to tag; see the module docstring.
+_METRICS: Dict[str, Callable[[Any], Any]] = {
+    "mean_iou": mean_iou,
+    "pixel_accuracy": overall_accuracy,
+    "iou_per_class": iou_per_class,
 }
 
 #: What a run measures when ``metrics`` is left unset.
@@ -192,8 +150,9 @@ class JaxSegmenter(ProgressReporting):
             ``torch.nn.CrossEntropyLoss`` to seven decimals (measured).
         metrics: Metric names (``"mean_iou"`` / ``"pixel_accuracy"`` / ``"iou_per_class"``) or
             callables. ``None`` picks the first two.
-        val_metrics / test_metrics: That split's OWN metrics, merged over ``metrics``. There is no
-            ``train_metrics``: the training pass computes the loss and nothing else.
+        train_metrics / val_metrics / test_metrics: That split's OWN metrics, merged over
+            ``metrics``. All three are served: this loop is ours, so each split gets its own set —
+            and the training one costs no second forward pass (see :meth:`_make_steps`).
         class_names: Labels for the per-class metric report; indices otherwise.
         plot_metrics: ALSO send each per-class metric to the trackers as a matplotlib bar chart.
         metric_names: How recorded metrics are named — see
@@ -227,6 +186,7 @@ class JaxSegmenter(ProgressReporting):
         optimizer: JaxOptimizer = "adam",
         loss: Optional[JaxLoss] = None,
         metrics: Optional[Sequence[JaxMetric]] = None,
+        train_metrics: Optional[Sequence[JaxMetric]] = None,
         val_metrics: Optional[Sequence[JaxMetric]] = None,
         test_metrics: Optional[Sequence[JaxMetric]] = None,
         class_names: Optional[List[str]] = None,
@@ -259,10 +219,12 @@ class JaxSegmenter(ProgressReporting):
         # silently replaced.
         self.loss: Optional[JaxLoss] = loss
         self.metrics: Optional[Sequence[JaxMetric]] = metrics
-        # Per-split ADDITIONS, merged over `metrics` by the shared rule. There is no
-        # `train_metrics` here and that is a property of this loop rather than an omission: the
-        # training pass computes the LOSS and nothing else, so a train-only metric would have
-        # nowhere to be computed.
+        # Per-split ADDITIONS, merged over `metrics` by the shared rule. ALL THREE are served:
+        # this loop belongs to the project, so each split gets its own set. The claim this slot's
+        # absence used to rest on ("the training pass computes the LOSS and nothing else") was true
+        # of the loop as written, not of JAX — the step now returns its logits as an aux output, so
+        # a training metric costs ONE reduction per batch.
+        self.train_metrics: Optional[Sequence[JaxMetric]] = train_metrics
         self.val_metrics: Optional[Sequence[JaxMetric]] = val_metrics
         self.test_metrics: Optional[Sequence[JaxMetric]] = test_metrics
         self.class_names: Optional[List[str]] = list(class_names) if class_names else None
@@ -406,11 +368,17 @@ class JaxSegmenter(ProgressReporting):
 
         def train_step(model: Any, optimizer: Any, x: Any, y: Any) -> Any:
             def forward(m: Any) -> Any:
-                return loss_fn(m(x, training=True), y)
+                # `has_aux`: the logits come back BESIDE the loss, so the training metrics are
+                # scored from the very tensor the gradient was taken through. Re-running the model
+                # to get them would cost a second forward pass AND measure a different network,
+                # since `training=True` leaves dropout and batch norm in train mode — a train/val
+                # gap that is expected would then read as a bug.
+                logits = m(x, training=True)
+                return loss_fn(logits, y), logits
 
-            loss, grads = nnx.value_and_grad(forward)(model)
+            (loss, logits), grads = nnx.value_and_grad(forward, has_aux=True)(model)
             optimizer.update(model, grads)
-            return loss
+            return loss, logits
 
         def eval_step(model: Any, x: Any, y: Any) -> Any:
             logits = model(x, training=False)
@@ -426,17 +394,43 @@ class JaxSegmenter(ProgressReporting):
 
         The combination rule is the workspace-wide one
         (:func:`~matrainer.metric_slots.merge_metric_specs`), so a config moving between backends
-        keeps its shape. Only ``val`` and ``test`` have a slot: this loop computes metrics on the
-        eval pass only.
+        keeps its shape. All THREE splits have a slot, because this loop is ours.
         """
         spec = merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics"))
         return spec if spec is not None else list(_DEFAULT_METRICS)
 
-    def _metric_values(self, logits: Any, labels: Any, metrics: Sequence[JaxMetric]) -> Dict[str, Any]:
-        """One batch's metric values, SCALARS AND VECTORS alike.
+    def _partition_metrics(self, split: str) -> Any:
+        """One split's metrics, split into the CONFUSION-based ones and the per-batch ones.
 
-        Returns the raw values rather than floats, because a per-class IoU is a ``[C]`` array and
-        coercing it here would be the drop this project already decided against.
+        Partitioned by NAME, before resolution, which is why only a NAMED metric can be
+        confusion-based: a user-supplied callable is scored per batch, since nothing here can know
+        what it would want accumulated.
+        """
+        confusion: Dict[str, Callable[[Any], Any]] = {}
+        batchwise: List[JaxMetric] = []
+        for metric in self._split_metrics(split):
+            name = flow(metric)
+            if isinstance(name, str) and name in _METRICS:
+                confusion[name] = _METRICS[name]
+            else:
+                batchwise.append(metric)
+        return confusion, batchwise
+
+    def _split_confusion(self, confusion: Dict[str, Callable[[Any], Any]]) -> Optional[np.ndarray]:
+        """A zeroed accumulator when this split wants one, else ``None``."""
+        if not confusion:
+            return None
+        if not self.num_classes:
+            raise RuntimeError("JaxSegmenter: a confusion-matrix metric needs num_classes.")
+        return zero_confusion(self.num_classes)
+
+    def _metric_values(self, logits: Any, labels: Any, metrics: Sequence[JaxMetric]) -> Dict[str, Any]:
+        """One batch's values for the metrics that are NOT confusion-based — user callables.
+
+        Returns the raw values rather than floats, because such a callable may return a ``[C]``
+        array and coercing it here would be the drop this project already decided against. These
+        are averaged over batches by the caller, which is the best a loop can do for a function
+        whose aggregation it cannot know.
         """
         out: Dict[str, Any] = {}
         for metric in metrics:
@@ -448,22 +442,33 @@ class JaxSegmenter(ProgressReporting):
     def _run_epoch(self, sequence: RecordSequence, step: Any, model: Any, split: str = "val") -> Dict[str, Any]:
         """One pass over ``sequence`` in EVAL mode, returning ``{"loss": …, **metrics}``.
 
-        Values are averaged over batches, which is why the vector metrics are accumulated with
-        ``jnp`` arithmetic rather than ``float()`` — a ``[C]`` per-class IoU averages element-wise.
+        The LOSS is averaged over batches, which is what a loss is. The METRICS are not: a named
+        one accumulates into this split's confusion matrix and is reduced ONCE at the end, so the
+        number matches what torchmetrics reports for the same predictions (see
+        ``matrainer.metric_functions``). Only a user-supplied CALLABLE is still batch-averaged,
+        which is why the vector arithmetic below stays element-wise.
         """
-        metrics = self._split_metrics(split)
+        confusion, batchwise = self._partition_metrics(split)
+        matrix = self._split_confusion(confusion)
         total, batches = 0.0, 0
         sums: Dict[str, Any] = {}
         for index in range(len(sequence)):
             x, y = sequence[index]
-            loss, logits = step(model, jnp.asarray(x), jnp.asarray(y))
+            labels = jnp.asarray(y)
+            loss, logits = step(model, jnp.asarray(x), labels)
             total += float(loss)
             batches += 1
-            for key, value in self._metric_values(logits, jnp.asarray(y), metrics).items():
+            if matrix is not None:
+                accumulate_confusion(matrix, np.asarray(logits), np.asarray(labels), self.ignore_index)
+            for key, value in self._metric_values(logits, labels, batchwise).items():
                 sums[key] = value if key not in sums else sums[key] + value
         if not batches:
             return {"loss": float("nan")}
-        return {"loss": total / batches, **{k: np.asarray(v) / batches for k, v in sums.items()}}
+        values: Dict[str, Any] = {"loss": total / batches}
+        values.update({k: np.asarray(v) / batches for k, v in sums.items()})
+        if matrix is not None:
+            values.update({name: fn(matrix) for name, fn in confusion.items()})
+        return values
 
     def _report(self, logs: Dict[str, Any], split: str = "train", step: Optional[int] = None) -> Dict[str, float]:
         """Split one epoch's values into the SCALARS a tracker takes and the vectors it does not.
@@ -513,14 +518,37 @@ class JaxSegmenter(ProgressReporting):
         train_seq = self._sequence(self.train_set, shuffle=True)
         val_seq = self._sequence(self.val_set) if self.val_set is not None else None
 
+        # Resolved ONCE, outside the epoch loop: the partition depends only on the config, while
+        # the accumulator has to be zeroed per EPOCH rather than per batch.
+        train_confusion, train_batchwise = self._partition_metrics("train")
+
         scalars: Dict[str, float] = {}
         for epoch in range(self.max_epochs):
             total, batches = 0.0, 0
+            sums: Dict[str, Any] = {}
+            matrix = self._split_confusion(train_confusion)
             for index in range(len(train_seq)):
                 x, y = train_seq[index]
-                total += float(train_step(model, optimizer, jnp.asarray(x), jnp.asarray(y)))
+                labels = jnp.asarray(y)
+                loss, logits = train_step(model, optimizer, jnp.asarray(x), labels)
+                total += float(loss)
                 batches += 1
+                # Scored from the logits the gradient was taken through, so these numbers describe
+                # the network AS IT TRAINED — dropout and batch norm in train mode. A gap against
+                # the validation column is therefore expected rather than a defect.
+                if matrix is not None:
+                    accumulate_confusion(matrix, np.asarray(logits), np.asarray(labels), self.ignore_index)
+                for key, value in self._metric_values(logits, labels, train_batchwise).items():
+                    sums[key] = value if key not in sums else sums[key] + value
             scalars = {"train/loss": total / batches if batches else float("nan")}
+            if batches:
+                # The SAME reduction the eval pass takes (`_run_epoch`) — accumulated once per
+                # epoch, not averaged per batch — so the two columns of one row are the same
+                # computation on different data.
+                values: Dict[str, Any] = {k: np.asarray(v) / batches for k, v in sums.items()}
+                if matrix is not None:
+                    values.update({name: fn(matrix) for name, fn in train_confusion.items()})
+                scalars.update(self._report(values, split="train", step=epoch))
             if val_seq is not None:
                 scalars.update(self._report(self._run_epoch(val_seq, eval_step, model), split="val", step=epoch))
             # A `fit()` would have done this for us; a hand-written loop has to. Forgetting it is
@@ -673,7 +701,13 @@ def _as_loss(value: Optional[JaxLoss]) -> Callable[..., Any]:
 
 
 def _as_metric(value: JaxMetric) -> Callable[..., Any]:
-    """A metric from a callable or its NAME (``"mean_iou"`` / ``"pixel_accuracy"`` / …)."""
+    """A metric CALLABLE — the per-batch kind, over ``(logits, labels, ignore_index)``.
+
+    A NAME in :data:`_METRICS` never reaches here: ``_partition_metrics`` routes it to the
+    confusion accumulator, whose functions take a MATRIX and have a different signature entirely.
+    What is left for this to do is resolve a user-supplied callable and refuse an unknown name,
+    naming the ones that exist — which is why the lookup stays.
+    """
     built = flow(value)
     if callable(built):
         return cast(Callable[..., Any], built)

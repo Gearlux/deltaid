@@ -1,0 +1,245 @@
+# The sweep overlay: EVERY backend live, ONE metric vocabulary, EVERY tracker selectable.
+#
+#   ../../examples/sweep/run_sweep.sh                   # the driver — see that script
+#   deltaid train examples/sweep/all_backends.yaml --framework jax --model unet --tracker mlflow
+#
+# ---------------------------------------------------------------------------
+# Why this is an OVERLAY and not a copy
+# ---------------------------------------------------------------------------
+# `include:` deep-merges the neighbouring example under this file, which then overrides only what
+# a sweep needs. Everything that makes the demo a demo — the dataset, the trimap handling, the
+# joint resize, the batch/epoch knobs, every framework block, the argument for why each
+# framework-specific key is a top-level sibling — is READ from there, so the two cannot drift.
+#
+# Two things this file adds, and each is the reason it exists rather than living in the example:
+#
+#  1. A TRACKER DIMENSION. `--tracker mlflow` picks where the results go, the same way
+#     `--framework` picks the engine. The names come from the top-level `experiment_name:` /
+#     `run_name:` through `!ref:`, so the ONE pair the driver sets reaches the run AND the tracker.
+#  2. ONE VOCABULARY FOR THE SCORE. Eight engines name their metrics eight ways, and a table whose
+#     columns are `mean_iou` / `jaccard_coeff_multi` / `sparse_categorical_accuracy` is a list of
+#     runs rather than a comparison. See the two sections below.
+#
+# What it does NOT add is a `!scope:model=unet` block — the EXAMPLE carries that one, because
+# making the shared spec reachable is worth having on a default checkout and not only under a
+# sweep. Nor does it nest per-engine `unet:` blocks the way the classification project's overlay
+# nests per-engine convnets: every non-torch block here ALREADY wires its own implementation
+# unconditionally and is spliced AFTER the top-level `unet:` block, so `--framework mlx --model
+# unet` reaches `MlxUNet` with nothing added (verified, and pinned by
+# `tests/test_sweep_config.py::test_each_non_torch_engine_gets_its_own_implementation_of_the_spec`
+# so a reordering cannot silently hand one of them the torch model).
+#
+# ---------------------------------------------------------------------------
+# What the matrix looks like
+# ---------------------------------------------------------------------------
+#   backend      zoo model                                  unet (--model unet)
+#   lightning    SegmentationModelPytorch unet/resnet34     TorchUNet
+#   torch        SegmentationModelPytorch unet/resnet34     TorchUNet
+#   fastai       SegmentationModelPytorch unet/resnet34     TorchUNet
+#   keras        —                                          KerasUNet
+#   tensorflow   —                                          TensorFlowUNet
+#   huggingface  HuggingFaceSegmentationModel segformer-b0  —
+#   jax          —                                          FlaxUNet
+#   mlx          —                                          MlxUNet
+#
+# ELEVEN cells, and both kinds of gap are structural rather than missing work. **No non-torch zoo
+# exists to wrap**: `segmentation_models_pytorch` is torch-only, `keras.applications` ships
+# classification backbones and no segmentation head, transformers dropped Flax in v5, and there is
+# no MLX segmentation zoo — which is exactly the observation `deltaid/unet/spec.py` exists to
+# answer, since four zoo models would compare four networks instead of four frameworks. And
+# **`huggingface` has no unet**: a `transformers.Trainer` calls its model with `labels=` and
+# subscripts `outputs["loss"]`, so it drives models that compute their own loss — a U-Net
+# returning bare logits does not satisfy that contract, and making it do so would mean wrapping it
+# in the very zoo machinery the spec exists to avoid.
+#
+# One ROW is therefore not comparable with the others on score, and that is honest rather than a
+# flaw: the huggingface row starts from real ADE20k weights while the five `*UNet` rows start from
+# noise. Compare the five with each other — that is what they are for — and read the Hub row as
+# the ceiling a pretrained encoder buys.
+
+include: ../train_unet_oxford_pets.yaml
+
+# `num_workers` is deliberately NOT set to 0 here, unlike the classification project's sweep.
+# `import fastai` switches the multiprocessing start method to `fork` PROCESS-WIDE, and a forked
+# DataLoader worker is where this project's two guards live (`ensure_materialized` plus recordstream's
+# `cv2.setNumThreads(0)`) — so a sweep that ran single-process would stop exercising the one path
+# whose failure is a SIGSEGV with no traceback. The example's `num_workers: 4` stands, and the cost
+# is a few seconds of worker startup per torch run.
+
+# ===========================================================================
+# Where the results go — one dimension, one block per tracker
+# ===========================================================================
+# `!ref:` rather than a literal: the driver sets `experiment_name` / `run_name` ONCE at the top
+# level and both the run and its tracker read the same value. A literal here would drift from
+# whatever the run is actually called, which is the one thing a sweep must not do.
+#
+# With no `--tracker` at all nothing is wired (the example's `trackers:` block is commented out),
+# so this file changes nothing about running the example by hand.
+
+mlflow: !scope:tracker=mlflow
+  trackers:
+    - !class:matrainer.MlflowTracker
+      experiment_name: !ref:experiment_name
+      run_name: !ref:run_name
+      # The workspace's own server (`aisland mlflow start`). Unset it and MLflow falls back to the
+      # ambient MLFLOW_TRACKING_URI, then to a local ./mlruns directory.
+      tracking_uri: http://127.0.0.1:5005
+      # Off for a sweep: each run would start a sampler thread and a subprocess monitor, and
+      # eleven of those in a row measure the sweep more than the model.
+      log_system_metrics: false
+
+tensorboard: !scope:tracker=tensorboard
+  trackers:
+    - !class:matrainer.TensorBoardTracker
+      experiment_name: !ref:experiment_name
+      run_name: !ref:run_name
+      save_dir: ./sweep_logs/tensorboard
+
+csv: !scope:tracker=csv
+  trackers:
+    - !class:matrainer.CsvTracker
+      experiment_name: !ref:experiment_name
+      run_name: !ref:run_name
+      save_dir: ./sweep_logs/csv
+
+aim: !scope:tracker=aim
+  trackers:
+    - !class:matrainer.AimTracker
+      experiment_name: !ref:experiment_name
+      run_name: !ref:run_name
+      save_dir: ./sweep_logs/aim
+
+clearml: !scope:tracker=clearml
+  trackers:
+    - !class:matrainer.ClearMLTracker
+      experiment_name: !ref:experiment_name
+      run_name: !ref:run_name
+      # No server and no credentials — the runs land on disk for `clearml-data`/the UI to import.
+      offline: true
+
+wandb: !scope:tracker=wandb
+  trackers:
+    - !class:matrainer.WandbTracker
+      experiment_name: !ref:experiment_name
+      run_name: !ref:run_name
+      save_dir: ./sweep_logs/wandb
+
+# ===========================================================================
+# What the results are CALLED
+# ===========================================================================
+# Each backend already TRANSLATES out of its engine's spelling on the way to a tracker
+# (`matrainer.MetricNames`, wired through every segmenter's `metric_names:` slot), so `val_loss`
+# (keras / jax / mlx), `valid_loss` (fastai) and `eval_loss` (a `transformers.Trainer`) all arrive
+# as `val/loss` with no key here at all.
+#
+# What translation cannot fix is a metric whose OWN name differs, because that name is chosen by
+# whoever wires it. Seven of the eight engines can produce the word `mean_iou` — it is the torch /
+# keras default and a registry name in the JAX, MLX and HuggingFace backends — and fastai cannot:
+# `fastai.metrics` publishes the quantity as the CLASS `JaccardCoeffMulti`, whose `Recorder` column
+# is `jaccard_coeff_multi` (measured). It is the same measurement (a per-class Jaccard, averaged),
+# so it belongs in the same column, and `renames:` is the knob for exactly that — "a metric this
+# module cannot know about", applied to the base name before the target's spelling.
+#
+# Do NOT reach for `renames:` to fix a name a USER wrote in a config. This one is generated by an
+# engine from a class name, which is the case the knob documents.
+metric_names: !class:matrainer.MetricNames
+  renames:
+    jaccard_coeff_multi: mean_iou
+
+# ===========================================================================
+# The SAME TWO QUANTITIES on every row
+# ===========================================================================
+# The torch backends default to mean IoU + macro DICE, while keras / tensorflow / jax / mlx /
+# huggingface default to mean IoU + PIXEL ACCURACY — one shared column and two half-empty ones.
+# Restating the pair here as torchmetrics templates lines the second column up.
+#
+# It is safe as a TOP-LEVEL key, and the reason is worth knowing because it is what saves the
+# example's `val_metrics:` too: confluid gates broadcast on the RECEIVING slot's annotation, and
+# every non-torch segmenter declares `metrics: Optional[List[...]]` — a MAPPING does not reach a
+# list-annotated slot, so this key is invisible to all SIX engines that cannot consume a
+# torchmetrics template. Only `LightningSegmenter` / `TorchSegmenter`, whose shared `MetricsSpec`
+# alias admits a mapping, receive it. (Verified both ways; pinned by
+# `tests/test_sweep_config.py::test_a_metric_set_never_reaches_an_engine_that_cannot_consume_it`.)
+#
+# `average: micro` per-pixel IS pixel accuracy: correct pixels over all pixels, which is what the
+# other five engines' `pixel_accuracy` computes.
+metrics:
+  mean_iou: !lazy:torchmetrics.classification.MulticlassJaccardIndex
+    average: macro
+  pixel_accuracy: !lazy:torchmetrics.classification.MulticlassAccuracy
+    average: micro
+
+# fastai is the ONE block a metric change has to reach individually, because its metrics are NAMES
+# resolved against `fastai.metrics` and the mapping above cannot reach it (see the annotation gate
+# in the section above). `JaccardCoeffMulti` alone, not the `DiceMulti` beside it in the example:
+# no other backend here reports Dice, so keeping it would open a twelfth column that ten of eleven
+# rows leave blank. Add an engine-specific metric when you want to look at THAT backend; leave it
+# out when you want to compare backends.
+#
+# **It is a CONSTRUCTOR kwarg, not a sibling key, and that is a second composition trap on top of
+# the replace-not-merge one below.** `include:` DEEP-MERGES, so a key the included file already has
+# keeps its ORIGINAL POSITION in the merged document while a key only this file introduces is
+# appended at the end — and a scope block is spliced into its parent where its key sits. So the
+# top-level `metrics:` above, being new here, lands AFTER this block however far up the file the
+# block is written, and as a sibling key `metrics:` here was silently overwritten by it (measured:
+# fastai resolved to the torchmetrics mapping, which a `Learner` cannot consume). An explicit
+# constructor kwarg is immune — it beats a broadcast one whatever the document order — which is
+# also why the huggingface block below states its metrics the same way.
+#
+# `pixel_accuracy` is deltaid's OWN name here, not one of fastai's: `fastai.metrics.accuracy`
+# argmaxes over `axis=-1`, which on an `[N, C, H, W]` prediction is the WIDTH, and `foreground_acc`
+# scores one class rather than all pixels — so the quantity the other seven engines report was
+# unreachable by name and left this row's cell blank. `_as_metric` resolves it to a small
+# accumulating `Metric` (see `PixelAccuracy`), which is why the column now fills.
+fastai: !scope:framework=fastai
+  runnable: !class:deltaid.FastaiSegmenter
+    one_cycle: true
+    learning_rate: 0.001
+    metrics:
+      - JaccardCoeffMulti
+      - pixel_accuracy
+
+# tensorflow — the example's block, plus the SavedModel export a sweep can afford to keep, under
+# `sweep_logs/` with everything else this run writes. Restated in full and not merely extended:
+# `include:` deep-merges MAPPINGS, and a `!scope:` parses to a `ScopeBlock` rather than a dict, so
+# an overlay block sharing a key REPLACES the included one wholesale. A block here holding only
+# `export_dir` would have dropped the runnable, the model AND the channels-last preprocess chain,
+# and `--framework tensorflow` would have trained a `LightningSegmenter` over CHW tensors under the
+# right name with nothing raising.
+tensorflow: !scope:framework=tensorflow
+  runnable: !class:deltaid.TensorFlowSegmenter
+    jit_compile: false
+    prefetch: true
+    export_dir: ./sweep_logs/exported/oxford_pets_unet
+  model: !lazy:deltaid.TensorFlowUNet
+    input_shape: [224, 224, 3]
+  preprocess:
+    - !class:recordstream.ops.image.ConvertToMask
+      field: segmentation_mask
+      output: mask
+    - !class:recordstream.ops.formula.FormulaOp
+      field: mask
+      formula: a - 1
+    - !class:recordstream.ops.structure.DropField
+      key: segmentation_mask
+    - !class:albumentations.Resize
+      height: 224
+      width: 224
+    - !class:albumentations.Normalize
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+
+# huggingface — the example's block with `output_dir` pointed at the sweep's own tree, so eleven
+# runs do not scatter `Trainer` checkpoints beside the metrics sidecars. Restated in full for the
+# replace-not-merge reason above; `use_cpu: true` is the example's measured MPS workaround and is
+# carried over verbatim (delete it on a CUDA box).
+huggingface: !scope:framework=huggingface
+  runnable: !class:deltaid.HuggingFaceSegmenter
+    learning_rate: 0.00006
+    metrics: [mean_iou, pixel_accuracy]
+    output_dir: ./sweep_logs/hf_runs
+    training_arguments: !lazy:transformers.TrainingArguments
+      use_cpu: true
+  model: !lazy:deltaid.HuggingFaceSegmentationModel
+    model_name: nvidia/segformer-b0-finetuned-ade-512-512
+    pretrained: true
