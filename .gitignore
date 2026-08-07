@@ -35,7 +35,7 @@ checkpoints/
 *.ckpt
 *.pt
 *.pth
-# Everything `examples/sweep/run_sweep.sh` writes: per-run logs, the file-backed trackers, the
+# Everything a sweep (`matrainer sweep`) writes: per-run logs, the file-backed trackers, the
 # SavedModel export and the huggingface Trainer's output_dir all land under one tree on purpose.
 sweep_logs/
 hf_runs/
