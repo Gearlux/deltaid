@@ -15,9 +15,9 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 from confluid import Fluid, LazyClass, lazy_param_names, to_pydantic
-from recordstream import Mask, collate_records
+from recordstream import Mask, collate_records, per_record_predictions
 
-from deltaid.lightning_segmenter import LightningSegmenter, _per_record_masks
+from deltaid.lightning_segmenter import LightningSegmenter
 
 NUM_CLASSES = 3
 SIDE = 32
@@ -188,12 +188,21 @@ class TestPerSplitMetrics:
         assert all(name.startswith("val/") and not name.startswith("val/val/") for name in seg.val_metrics)
 
     def test_the_shared_rule_comes_from_matrainer(self) -> None:
-        """One combination rule across every backend AND both tasks — never re-derived here."""
+        """One combination rule across every backend AND both tasks — never re-derived here.
+
+        Since the 2026-08-06 consolidation the rule is applied by the shared family base
+        (`matrainer.torch.runnable._build_split_metrics`, pinned in matrainer's suite); what
+        this module must not do is SHADOW the builder with an inline re-derivation.
+        """
         import inspect
+
+        import matrainer.torch.runnable as family
 
         import deltaid.lightning_segmenter as module
 
-        assert "from matrainer.metric_slots import" in inspect.getsource(module)
+        source = inspect.getsource(module)
+        assert "def _build_split_metrics" not in source, "the shared metric builder is shadowed"
+        assert "from matrainer.metric_slots import" in inspect.getsource(family)
 
 
 # --------------------------------------------------------------------------- #
@@ -349,7 +358,9 @@ metric_names: !class:matrainer.MetricNames
 
         source = inspect.getsource(module)
         assert "_config_params" not in source
-        assert "runnable=self" in source
+        # `runnable=self` lives in the shared machinery base's `_build_trainer` since
+        # 2026-08-06 (pinned in matrainer's suite); the module must not shadow it.
+        assert "def _build_trainer" not in source
 
 
 # --------------------------------------------------------------------------- #
@@ -396,7 +407,7 @@ class TestTheBatchBoundary:
         """The sink contract is per-record while the model emits `[N, ...]`; handing the batch
         over whole writes ONE entry for an N-record batch."""
         preds = {"mask": torch.zeros(4, 8, 8), "probs": torch.zeros(4, 3, 8, 8)}
-        assert len(_per_record_masks(preds)) == 4
+        assert len(per_record_predictions(preds)) == 4
 
     def test_predictions_reach_a_sink_paired_with_their_metadata(self) -> None:
         written: List[Any] = []

@@ -149,8 +149,14 @@ class TestParityWithTheLightningBackend:
         assert set(seg.train_metrics.keys()) == {"train/mean_iou", "train/dice_macro"}
 
     def test_it_uses_the_shared_combination_rule(self) -> None:
-        """One rule across every backend AND both tasks — never re-derived per backend."""
-        assert "from matrainer.metric_slots import" in Path(inspect.getfile(TorchSegmenter)).read_text()
+        """One rule across every backend AND both tasks — never re-derived per backend.
+
+        The `merge_metric_specs` call lives in the shared family base's `_build_split_metrics`
+        since 2026-08-06 (pinned in matrainer's suite); the module must not shadow the builder.
+        """
+        source = Path(inspect.getfile(TorchSegmenter)).read_text()
+        assert "def _build_split_metrics" not in source
+        assert "merge_metric_specs" not in source, "re-deriving the combination inline is the drift this pins"
 
     def test_the_target_is_read_back_as_int64(self) -> None:
         from recordstream import collate_records
@@ -196,7 +202,9 @@ class TestTheSharedContract:
         """matrainer owns the ONE derivation, so two backends cannot answer differently."""
         source = Path(inspect.getfile(TorchSegmenter)).read_text()
         assert "_config_params" not in source
-        assert "runnable=self" in source
+        # `runnable=self` lives in the shared loop base's `_log_run_context` since 2026-08-06
+        # (pinned in matrainer's suite); the module must not shadow it.
+        assert "def _log_run_context" not in source
 
     def test_the_terminal_call_is_the_one_that_ends_the_run(self) -> None:
         """`capture_log_file` finalizes every tracker — a backend calling `finalize` itself would

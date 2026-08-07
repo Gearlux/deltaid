@@ -39,6 +39,38 @@ FUNCTION_BACKENDS: Set[str] = {
 TRACKING_CALLBACKS = ("TrackingCallback", "keras_tracking_callback")
 
 
+def built_on_shared_base(source: str) -> bool:
+    """The 2026-08-06 consolidation: a backend on a shared machinery base inherits its
+    tracking wiring — `runnable=self` + `TrackingCallback` in `_build_trainer` (lightning) /
+    `_log_run_context` and the per-epoch `tracker.log_metrics` in `fit` (the owned loop), the
+    once-flowed trackers, the naming knob's application, the fork warm in the task base's
+    `initialize` — all pinned in matrainer's own suite. What such a module must not do is
+    SHADOW that wiring."""
+    return "LightningRunnable" in source or "TorchLoopRunnable" in source
+
+
+def assert_does_not_shadow_the_shared_wiring(stem: str, source: str) -> None:
+    shared = (
+        # the Lightning machinery base's wiring
+        "_build_trainer",
+        "_run_eval",
+        "_report_epoch_metrics",
+        # the owned-loop machinery base's wiring
+        "fit",
+        "_score",
+        "_epoch_metrics",
+        "_log_run_context",
+        # both
+        "_live_trackers",
+        "initialize",
+    )
+    for name in shared:
+        assert f"def {name}" not in source, (
+            f"{stem} is built on the shared base but shadows {name} — the inherited wiring "
+            "no longer applies; extend via the hooks instead."
+        )
+
+
 def _backends() -> Dict[str, str]:
     """``{module stem: source}`` for every backend on disk."""
     return {path.stem: path.read_text() for path in sorted(SOURCE_DIR.glob("*_segmenter.py"))}
@@ -59,7 +91,11 @@ def test_every_backend_hands_matrainer_the_RUNNABLE(stem: str) -> None:
     the resolved config), so two backends transcribing their own would give two answers to "what
     were the hyperparameters?" for the same config.
     """
-    assert "runnable=self" in _backends()[stem]
+    source = _backends()[stem]
+    if built_on_shared_base(source):
+        assert_does_not_shadow_the_shared_wiring(stem, source)
+        return
+    assert "runnable=self" in source
 
 
 @pytest.mark.parametrize("stem", sorted(CALLBACK_BACKENDS | FUNCTION_BACKENDS))
@@ -77,6 +113,10 @@ def test_a_function_driven_backend_finishes_its_manifest(stem: str) -> None:
     atexit hook then labels a SUCCESSFUL run `interrupted`.
     """
     source = _backends()[stem]
+    if built_on_shared_base(source):
+        # Both calls live in the shared loop base's `fit()` (pinned in matrainer's suite).
+        assert_does_not_shadow_the_shared_wiring(stem, source)
+        return
     assert "capture_log_file" in source
     assert "log_run_context" in source
 
@@ -86,6 +126,9 @@ def test_a_callback_driven_backend_lets_the_callback_own_the_lifecycle(stem: str
     """A tracking callback captures on start and finishes on end, so the backend must NOT also
     call `capture_log_file` — that would finish the manifest twice."""
     source = _backends()[stem]
+    if built_on_shared_base(source):
+        assert "capture_log_file" not in source
+        return  # the shared base wires TrackingCallback, whose end hook owns the lifecycle
     assert any(name in source for name in TRACKING_CALLBACKS), f"{stem} reaches no tracking callback"
     assert "capture_log_file" not in source
 
@@ -103,6 +146,9 @@ def test_every_backend_flows_its_trackers_once_and_writes_them_back(stem: str) -
     """`flow()` on a live object is idempotent, but a deferred `Fluid` is REBUILT on every call —
     which for an MLflow tracker means two runs recorded for one training run."""
     source = _backends()[stem]
+    if built_on_shared_base(source):
+        assert_does_not_shadow_the_shared_wiring(stem, source)
+        return
     assert "_live_trackers" in source
     assert "self.trackers = [flow(t) for t in as_tracker_list(self.trackers) or []]" in source
 
@@ -141,7 +187,11 @@ def test_every_backend_takes_the_metric_naming_knob(stem: str) -> None:
 @pytest.mark.parametrize("stem", sorted(CALLBACK_BACKENDS | FUNCTION_BACKENDS))
 def test_every_backend_applies_the_naming_it_was_given(stem: str) -> None:
     """Declaring the slot is half of it — what the backend reports has to go THROUGH it."""
-    assert "as_metric_names" in _backends()[stem], (
+    source = _backends()[stem]
+    if built_on_shared_base(source):
+        assert_does_not_shadow_the_shared_wiring(stem, source)
+        return
+    assert "as_metric_names" in source, (
         f"{stem} declares `metric_names` but never applies it: call "
         "`as_metric_names(self.metric_names)` where metrics reach a tracker or the sidecar."
     )
@@ -166,7 +216,13 @@ def test_every_backend_warms_its_sources_before_forking(stem: str) -> None:
     start method to `fork` PROCESS-WIDE — so any backend sharing that interpreter inherits the
     hazard, not just the one that imported it.
     """
-    assert "ensure_materialized" in _backends()[stem]
+    source = _backends()[stem]
+    if built_on_shared_base(source):
+        # The fork warm lives in the task base's `initialize` (via `_prepare` →
+        # recordstream's `prepare_record_dataset`, pinned upstream); no shadow = it applies.
+        assert "def initialize" not in source, f"{stem} shadows the shared (warming) initialize"
+        return
+    assert "ensure_materialized" in source
 
 
 #: How each backend gets its METRICS onto the wired trackers — a DIFFERENT question from the
@@ -195,6 +251,12 @@ def test_every_backend_puts_its_METRICS_on_the_trackers() -> None:
     comparison, every tracker UI and every sweep."""
     for name, marker in METRIC_BRIDGES.items():
         source = (SOURCE_DIR / name).read_text()
+        if built_on_shared_base(source):
+            # The bridge lives in the shared machinery base (the `TrackerLogger` adapters in
+            # `_build_trainer` / the `tracker.log_metrics` calls in the loop's `fit` and
+            # `_score`) — pinned in matrainer's own suite; no shadow = it applies.
+            assert_does_not_shadow_the_shared_wiring(name, source)
+            continue
         assert marker in source, f"{name} never reaches a tracker's metric channel via {marker}"
 
 
