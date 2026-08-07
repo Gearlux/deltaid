@@ -849,6 +849,8 @@ class LightningSegmenter(SegmentationTorchHooks, LightningRunnable):
 
 **Amendment (2026-08-07).** The bare-torch backend joined the same shape: ``TorchSegmenter`` is `(SegmentationTorchHooks, matrainer.torch.TorchLoopRunnable)` — the same task hooks, a different machinery base (the owned epoch loop instead of a `pl.Trainer`), and NOTHING else: the concrete is the flat constructor alone.
 
+**Amendment (2026-08-07, second).** The fastai backend joined: ``FastaiSegmenter`` is `(SegmentationTorchHooks, matrainer.fastai.FastaiRunnable)` — the same task hooks, the Learner machinery base, plus the task's fastai vocabulary as hooks (`CrossEntropyLossFlat(axis=1)` as the default, the DiceMulti/JaccardCoeffMulti pair, the `pixel_accuracy` alias). Its `evaluate` was harmonized to score the VAL split.
+
 **What you may change.** Hook implementations and task state freely; the concrete signature
 (it is the config surface). What you may not do: shadow the inherited machinery
 (`_build_trainer` / `_live_trackers` / `_run_eval` / `_report_epoch_metrics`) — extend through
