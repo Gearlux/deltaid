@@ -17,17 +17,20 @@ import pytest
 import torch
 import torch.nn as nn
 from confluid import LazyClass, lazy_param_names, to_pydantic
-from recordstream import Mask
+from recordstream import Mask, Stream
 
 fastai = pytest.importorskip("fastai")
 
-from deltaid.fastai_segmenter import (  # noqa: E402
-    DEFAULT_METRICS,
-    FastaiSegmenter,
-    PixelAccuracy,
-    _as_metric,
-    _as_opt_func,
-)
+from matrainer.fastai import as_opt_func as _as_opt_func  # noqa: E402
+
+from deltaid.fastai_segmenter import DEFAULT_METRICS, FastaiSegmenter, PixelAccuracy  # noqa: E402
+
+
+def _as_metric(name: str, ignore_index: int = -100) -> Any:
+    """Resolve a metric the way a built segmenter does — the base's alias-first resolution."""
+    segmenter = FastaiSegmenter(model=torch.nn.Identity(), ignore_index=ignore_index)
+    return segmenter._resolve_metric(name)
+
 
 NUM_CLASSES = 3
 SIDE = 32
@@ -115,8 +118,10 @@ class TestTheFastaiFacts:
         from fastai.learner import Learner
 
         assert hasattr(Learner, "fit_one_cycle")
-        source = Path(inspect.getfile(FastaiSegmenter)).read_text()
-        assert "from fastai.callback import schedule" in source
+        # The load-bearing import lives ONCE, in the shared machinery base — pinned there.
+        import matrainer.fastai.learner as base_mod
+
+        assert "from fastai.callback import schedule" in Path(base_mod.__file__).read_text()
 
     def test_a_metric_name_that_does_not_exist_says_where_names_come_from(self) -> None:
         with pytest.raises(ValueError, match="fastai.metrics"):
@@ -226,7 +231,11 @@ class TestForkSafety:
         worker dies with a SIGSEGV and no traceback (`DataLoader worker exited unexpectedly`).
         """
         source = Path(inspect.getfile(FastaiSegmenter)).read_text()
-        assert "ensure_materialized" in source
+        # The warm lives in the shared base's data seams (`_dataloaders` / `_validate_split` /
+        # `predict` all `_prepare` — normalize + materialize — in the parent), pinned in
+        # matrainer's own suite; the module must not shadow them.
+        for name in ("_dataloaders", "_validate_split", "predict", "_prepare"):
+            assert f"def {name}" not in source, f"fastai_segmenter shadows the shared (warming) {name}"
         # And no path resolves a dataset WITHOUT warming it: every call site goes through
         # `_prepare`, so a new entry point cannot quietly skip the guard.
         assert "ensure_record_dataset(self." not in source
@@ -266,10 +275,10 @@ class TestParity:
         assert isinstance(seg.model, nn.Module)
 
     def test_a_non_module_model_fails_during_SETUP(self) -> None:
-        """Not minutes into a fit."""
-        seg = _segmenter(model="not a model")
+        """Not minutes into a fit — the check fires at Learner assembly, still during setup."""
+        seg = _segmenter(model="not a model", train_set=Stream(source=_records(4)))
         with pytest.raises(TypeError, match="must be a torch.nn.Module"):
-            seg.initialize()
+            seg.run()
 
     def test_all_four_metric_slots_are_declared(self) -> None:
         """`train_metrics` IS served. The claim its absence rested on — "a `Learner` computes its
@@ -284,8 +293,8 @@ class TestParity:
         and the numbers describe the network as it trained. Only on the fit path:
         `Learner.validate()` runs no training pass, so train columns there would name rows nobody
         fills."""
-        source = inspect.getsource(FastaiSegmenter._build_learner)
-        assert 'if split == "val":' in source
+        source = inspect.getsource(FastaiSegmenter._build_learner)  # resolves to the shared base's
+        assert 'if split == "val" and self.task == "fit":' in source
         assert "learner.recorder.train_metrics = True" in source
 
     def test_a_fit_UNIONS_the_train_and_val_slots_while_test_NARROWS(self) -> None:
@@ -299,7 +308,9 @@ class TestParity:
         assert list(seg._learner_metrics("test")) == ["DiceMulti", "JaccardCoeffMulti"]
 
     def test_it_uses_the_shared_combination_rule(self) -> None:
-        assert "from matrainer.metric_slots import" in Path(inspect.getfile(FastaiSegmenter)).read_text()
+        # The rule lives in the shared base's `_learner_metrics` (union on fit, narrow on eval)
+        # — pinned in matrainer's own suite; the module must not shadow it.
+        assert "def _learner_metrics" not in Path(inspect.getfile(FastaiSegmenter)).read_text()
 
     def test_the_loaders_are_the_lightning_backends_construction(self) -> None:
         """Same names, same deferral, same overridability — so ONE config idiom drives both. The
@@ -322,7 +333,9 @@ class TestParity:
     def test_no_local_hyperparameter_derivation_survives(self) -> None:
         source = Path(inspect.getfile(FastaiSegmenter)).read_text()
         assert "_config_params" not in source
-        assert "runnable=self" in source
+        # `runnable=self` lives in the shared base's `fit()` (`log_run_context`) since
+        # 2026-08-07 — pinned in matrainer's suite; the module must not shadow it.
+        assert "def fit" not in source and "def _log_run_context" not in source
 
     def test_the_terminal_call_is_the_one_that_ends_the_run(self) -> None:
         source = inspect.getsource(FastaiSegmenter.fit)
