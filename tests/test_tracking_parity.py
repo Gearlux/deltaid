@@ -46,7 +46,8 @@ def built_on_shared_base(source: str) -> bool:
     once-flowed trackers, the naming knob's application, the fork warm in the task base's
     `initialize` — all pinned in matrainer's own suite. What such a module must not do is
     SHADOW that wiring."""
-    return "LightningRunnable" in source or "TorchLoopRunnable" in source or "FastaiRunnable" in source
+    markers = ("LightningRunnable", "TorchLoopRunnable", "FastaiRunnable", "KerasRunnable", "TensorFlowRunnable")
+    return any(marker in source for marker in markers)
 
 
 def assert_does_not_shadow_the_shared_wiring(stem: str, source: str) -> None:
@@ -60,6 +61,9 @@ def assert_does_not_shadow_the_shared_wiring(stem: str, source: str) -> None:
         "_score",
         "_epoch_metrics",
         "_log_run_context",
+        # the keras-family machinery bases' wiring (the tracking callback + the loop)
+        "_callbacks",
+        "_run_epoch",
         # both
         "_live_trackers",
         "initialize",

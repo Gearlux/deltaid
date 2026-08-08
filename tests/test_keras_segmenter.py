@@ -152,14 +152,14 @@ class TestWhatTheEngineChanges:
         stops being true. Classification never hit it because its metrics are per-IMAGE, so the
         same scatter loops over 8 indices instead of 401,408.
         """
-        import deltaid.keras_segmenter as module
+        import deltaid.segmentation_keras as module
 
         seen: List[str] = []
         original_backend, original_warning = module.keras_backend, module.logger.warning
         module.keras_backend = lambda: "torch"  # type: ignore[assignment]
         module.logger.warning = lambda msg, *a, **k: seen.append(str(msg))  # type: ignore[assignment]
         try:
-            module.KerasSegmenter._warn_if_the_engine_cannot_afford_these_metrics(
+            _segmenter()._check_compiled_metrics(
                 [keras.metrics.MeanIoU(num_classes=3), keras.metrics.SparseCategoricalAccuracy()]
             )
         finally:
@@ -170,20 +170,16 @@ class TestWhatTheEngineChanges:
 
     def test_no_warning_when_the_engine_can_afford_them(self) -> None:
         """Both halves matter: another engine, or a metric that does not scatter per pixel."""
-        import deltaid.keras_segmenter as module
+        import deltaid.segmentation_keras as module
 
         seen: List[str] = []
         original_backend, original_warning = module.keras_backend, module.logger.warning
         module.logger.warning = lambda msg, *a, **k: seen.append(str(msg))  # type: ignore[assignment]
         try:
             module.keras_backend = lambda: "tensorflow"  # type: ignore[assignment]
-            module.KerasSegmenter._warn_if_the_engine_cannot_afford_these_metrics(
-                [keras.metrics.MeanIoU(num_classes=3)]
-            )
+            _segmenter()._check_compiled_metrics([keras.metrics.MeanIoU(num_classes=3)])
             module.keras_backend = lambda: "torch"  # type: ignore[assignment]
-            module.KerasSegmenter._warn_if_the_engine_cannot_afford_these_metrics(
-                [keras.metrics.SparseCategoricalAccuracy()]
-            )
+            _segmenter()._check_compiled_metrics([keras.metrics.SparseCategoricalAccuracy()])
         finally:
             module.keras_backend, module.logger.warning = original_backend, original_warning  # type: ignore[assignment]
 
@@ -229,8 +225,12 @@ class TestParityWithTheReferenceBackend:
         assert _resolved(_segmenter(model=LazyClass(_TinyNet), num_classes=None, train_set=_records())) == 3
 
     def test_it_uses_the_shared_combination_rule(self) -> None:
-        """One rule across every backend AND both tasks — never re-derived per backend."""
-        assert "from matrainer.metric_slots import" in Path(inspect.getfile(KerasSegmenter)).read_text()
+        """One rule across every backend AND both tasks — never re-derived per backend. Since
+        P5 the union lives on the FAMILY base; the concrete must inherit, not re-derive."""
+        from matrainer.keras.runnable import KerasTrainerRunnable
+
+        assert KerasSegmenter._compiled_metrics is KerasTrainerRunnable._compiled_metrics
+        assert "union_metric_specs" in inspect.getsource(KerasTrainerRunnable._compiled_metrics)
 
     def test_the_entrypoint_markers_are_the_dispatch_table(self) -> None:
         from recordstream.runnable import runnable_entrypoints
@@ -249,9 +249,14 @@ class TestParityWithTheReferenceBackend:
         assert {"model", "train_set", "optimizer", "loss"} <= lazy_param_names(KerasSegmenter)
 
     def test_no_local_hyperparameter_derivation_survives(self) -> None:
+        """`runnable=self` rides the FAMILY base's `_callbacks` since P5 — the concrete must
+        neither re-derive params nor shadow that wiring."""
+        from matrainer.keras.runnable import KerasTrainerRunnable
+
         source = Path(inspect.getfile(KerasSegmenter)).read_text()
         assert "_config_params" not in source
-        assert "runnable=self" in source
+        assert "def _callbacks" not in source
+        assert "runnable=self" in inspect.getsource(KerasTrainerRunnable._callbacks)
 
 
 # --------------------------------------------------------------------------- #
@@ -282,10 +287,14 @@ class TestTheLoop:
         seg.run()
         assert "test/mean_iou" in json.loads((tmp_path / "metrics.json").read_text())["metrics"]
 
-    def test_evaluate_and_test_are_the_same_class(self) -> None:
+    def test_evaluate_scores_the_validation_split(self) -> None:
+        """The fleet harmonization (P5, matching the torch-loop and fastai bases): `evaluate`
+        used to delegate to `test()` and score the WRONG split under the shared verb
+        vocabulary."""
         seg = _segmenter(task="evaluate", test_set=_records(4))
+        seg.val_set = _records(4)
         seg.run()
-        assert "test/mean_iou" in seg.computed_metrics
+        assert "val/mean_iou" in seg.computed_metrics
 
     def test_predict_streams_every_record_to_the_sink_and_closes_it(self) -> None:
         written: List[Any] = []
