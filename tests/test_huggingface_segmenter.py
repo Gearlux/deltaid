@@ -255,7 +255,10 @@ class TestTheSharedContract:
     def test_no_local_hyperparameter_derivation_survives(self) -> None:
         source = Path(inspect.getfile(HuggingFaceSegmenter)).read_text()
         assert "_config_params" not in source
-        assert "runnable=self" in source
+        # The tracking hookup moved to the machinery base (P6) — the one derivation is pinned there.
+        from matrainer.huggingface.trainer import HuggingFaceRunnable
+
+        assert "runnable=self" in Path(inspect.getfile(HuggingFaceRunnable)).read_text()
 
     def test_overriding_the_training_arguments_slot_ADDS_to_the_derived_floor(self) -> None:
         """A config reaching for one of `TrainingArguments`' ~100 fields must not lose the rest.
