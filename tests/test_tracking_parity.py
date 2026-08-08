@@ -46,7 +46,16 @@ def built_on_shared_base(source: str) -> bool:
     once-flowed trackers, the naming knob's application, the fork warm in the task base's
     `initialize` — all pinned in matrainer's own suite. What such a module must not do is
     SHADOW that wiring."""
-    markers = ("LightningRunnable", "TorchLoopRunnable", "FastaiRunnable", "KerasRunnable", "TensorFlowRunnable")
+    markers = (
+        "LightningRunnable",
+        "TorchLoopRunnable",
+        "FastaiRunnable",
+        "KerasRunnable",
+        "TensorFlowRunnable",
+        "HuggingFaceRunnable",
+        "JaxLoopRunnable",
+        "MlxLoopRunnable",
+    )
     return any(marker in source for marker in markers)
 
 
@@ -69,7 +78,9 @@ def assert_does_not_shadow_the_shared_wiring(stem: str, source: str) -> None:
         "initialize",
     )
     for name in shared:
-        assert f"def {name}" not in source, (
+        # Anchored with the paren: the entries are METHOD names, and a hook that merely
+        # STARTS with one (`_score_batch` vs the loop's `_score`) is not a shadow.
+        assert f"def {name}(" not in source, (
             f"{stem} is built on the shared base but shadows {name} — the inherited wiring "
             "no longer applies; extend via the hooks instead."
         )

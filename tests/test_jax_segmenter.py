@@ -133,7 +133,9 @@ class TestWhatTheEngineChanges:
         with pytest.raises(ValueError, match="optax.losses"):
             _segmenter(loss="not_a_loss")._loss_fn()
         with pytest.raises(ValueError, match="Known names"):
-            _segmenter(metrics=["not_a_metric"])._metric_values(None, None, ["not_a_metric"])
+            from deltaid.jax_segmenter import _as_metric
+
+            _as_metric("not_a_metric")
 
 
 # --------------------------------------------------------------------------- #
@@ -172,9 +174,8 @@ class TestTheMetrics:
 
     def test_no_accumulator_is_built_when_no_named_metric_was_wired(self) -> None:
         seg = _segmenter(metrics=[lambda logits, labels, ignore: 1.0])
-        confusion, _ = seg._partition_metrics("val")
 
-        assert seg._split_confusion(confusion) is None
+        assert seg._new_split_state("val")["matrix"] is None
 
     def test_the_metric_does_not_depend_on_the_BATCH_SIZE(self) -> None:
         """The property the whole change exists for, exercised through the real epoch loop.
@@ -190,7 +191,7 @@ class TestTheMetrics:
             seg = _segmenter(batch_size=size)
             seg.initialize()
             _, eval_step = seg._make_steps()
-            scores[size] = float(seg._run_epoch(seg._sequence(records), eval_step, seg.model)["mean_iou"])
+            scores[size] = float(seg._eval_pass(seg._sequence(records), eval_step, "val")["val/mean_iou"])
 
         assert len({round(value, 10) for value in scores.values()}) == 1, scores
 
@@ -205,9 +206,9 @@ class TestTheMetrics:
         for record in records:
             record["mask"] = Mask(np.full((SIDE, SIDE), 255, dtype=np.int64))
 
-        values = seg._run_epoch(seg._sequence(records), eval_step, seg.model)
-        assert float(values["mean_iou"]) == 0.0
-        assert float(values["pixel_accuracy"]) == 0.0
+        values = seg._eval_pass(seg._sequence(records), eval_step, "val")
+        assert float(values["val/mean_iou"]) == 0.0
+        assert float(values["val/pixel_accuracy"]) == 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -223,8 +224,10 @@ class TestTheSharedContract:
 
     def test_a_split_slot_adds_to_the_shared_set_for_that_split_only(self) -> None:
         seg = _segmenter(metrics=["mean_iou"], val_metrics=["pixel_accuracy"])
-        assert list(seg._split_metrics("val")) == ["mean_iou", "pixel_accuracy"]
-        assert list(seg._split_metrics("test")) == ["mean_iou"]
+        confusion, _ = seg._partition_metrics("val")
+        assert list(confusion) == ["mean_iou", "pixel_accuracy"]
+        test_confusion, _ = seg._partition_metrics("test")
+        assert list(test_confusion) == ["mean_iou"]
 
     def test_all_four_metric_slots_are_declared(self) -> None:
         """The training pass scores too. What used to be described as a property of JAX was a
@@ -232,10 +235,8 @@ class TestTheSharedContract:
         training metric costs ONE reduction per batch and no second forward pass."""
         params = inspect.signature(JaxSegmenter.__init__).parameters
         assert {"metrics", "train_metrics", "val_metrics", "test_metrics"} <= set(params)
-        assert list(_segmenter(metrics=["mean_iou"], train_metrics=["pixel_accuracy"])._split_metrics("train")) == [
-            "mean_iou",
-            "pixel_accuracy",
-        ]
+        confusion, _ = _segmenter(metrics=["mean_iou"], train_metrics=["pixel_accuracy"])._partition_metrics("train")
+        assert list(confusion) == ["mean_iou", "pixel_accuracy"]
 
     def test_the_train_step_returns_the_logits_it_took_the_gradient_through(self) -> None:
         """`has_aux`, so the training metrics measure the network AS IT TRAINED. Re-running the
@@ -243,7 +244,7 @@ class TestTheSharedContract:
         norm), so an expected train/val gap would read as a bug."""
         source = inspect.getsource(JaxSegmenter._make_steps)
         assert "has_aux=True" in source
-        assert "return loss, logits" in source
+        assert "return loss, outputs" in source
 
     def test_the_entrypoint_markers_are_the_dispatch_table(self) -> None:
         from recordstream.runnable import runnable_entrypoints
@@ -340,10 +341,11 @@ class TestTheLoop:
         seg.run()
         assert "test/mean_iou" in json.loads((tmp_path / "metrics.json").read_text())["metrics"]
 
-    def test_evaluate_and_test_are_the_same_class(self) -> None:
-        seg = _segmenter(task="evaluate", test_set=_records(4))
+    def test_evaluate_scores_the_validation_split(self) -> None:
+        """The fleet harmonization: `evaluate` used to delegate to `test()` in this backend."""
+        seg = _segmenter(task="evaluate", val_set=_records(4))
         seg.run()
-        assert "test/mean_iou" in seg.computed_metrics
+        assert "val/mean_iou" in seg.computed_metrics
 
     def test_predict_streams_every_record_to_the_sink_and_closes_it(self) -> None:
         written: List[Any] = []

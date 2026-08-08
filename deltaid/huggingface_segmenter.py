@@ -1,69 +1,51 @@
 """``HuggingFaceSegmenter`` — the segmentation run with ``transformers.Trainer`` driving it.
 
-The sixth backend and the one that writes least while swapping most: ``Trainer`` owns the epoch,
-the optimizer, the scheduler, gradient accumulation, mixed precision and distribution (via
-Accelerate). What deltaid supplies is the data, the run identity and the artifacts.
+Since P6 (2026-08-08) this is ``(SegmentationBase, matrainer.huggingface.
+HuggingFaceRunnable)``: the machinery — the deferred ``TrainingArguments`` / ``Trainer``
+slots, the run-time argument FLOOR, the entry points with the plain-function tracking hookup,
+the ``log_history`` replay, the record-loader predict walk — lives in
+:class:`matrainer.huggingface.trainer.HuggingFaceRunnable`; the ``num_classes`` resolution
+(model head → explicit → lazy kwarg → the announced mask walk) in
+:class:`~deltaid.segmentation_base.SegmentationBase`. What stays HERE is segmentation's
+huggingface vocabulary, and TWO of its three pieces are facts about semantic segmentation on
+the Hub with no classification analogue:
 
-**What it owns is three things, and TWO are facts about semantic segmentation on the Hub that
-have no classification analogue:**
-
-1. ``_to_hf_batch`` — one collated record batch to ``{"pixel_values", "labels"}``, handed to
-   ``Trainer`` as its ``data_collator``, which is the same seat a ``collate_fn`` occupies
-   elsewhere.
+1. ``_to_hf_batch`` — one collated record batch to ``{"pixel_values", "labels"}``, the mask
+   read int64 (albumentations returns int32 and the cross-entropy family rejects it).
 2. **The logits come back at a REDUCED resolution, and everything downstream must upsample.**
-   SegFormer emits ``[N, C, H/4, W/4]`` — measured: a 224x224 input gives 56x56 — and upsamples
-   internally *only* for its own loss. So the metric hook and the prediction path both resize the
-   logits to the label resolution first; comparing them raw does not merely score badly, it
-   RAISES (*"If `preds` have one dimension more than `target`, the shape of `preds`…"*).
+   SegFormer emits ``[N, C, H/4, W/4]`` — measured: a 224x224 input gives 56x56 — and
+   upsamples internally *only* for its own loss. So the metric hook and the prediction path
+   both resize the logits to the label resolution first; comparing them raw does not merely
+   score badly, it RAISES.
 3. **The ignore index is the MODEL's config knob, and its default is 255, not torch's -100.**
    ``initialize()`` writes the segmenter's ``ignore_index`` onto
-   ``config.semantic_loss_ignore_index``. Without that a mask using deltaid's default would reach
-   ``cross_entropy`` as an out-of-range class id and raise — which is the honest failure, but for
+   ``config.semantic_loss_ignore_index``. Without that a mask using deltaid's default would
+   reach ``cross_entropy`` as an out-of-range class id and raise — the honest failure, for
    the wrong reason.
 
 **There is NO loss set and that is a fact about transformers, not an omission:** an
-``AutoModelForSemanticSegmentation`` handed ``labels=`` computes its own loss inside ``forward``,
-so there is nothing a config could wire and therefore no ``huggingface_segmentation.py``. Its
-``FRAMEWORKS`` entry has ``registrations=None``.
-
-``report_to`` defaults to ``"none"`` ON PURPOSE: Trainer auto-enables every tracker it can import,
-and this workspace has wandb AND mlflow installed, so the default would silently start reporting
-to both. Tracking goes through the ``trackers`` slot like every other backend.
+``AutoModelForSemanticSegmentation`` handed ``labels=`` computes its own loss inside
+``forward``, so there is nothing a config could wire and therefore no
+``huggingface_segmentation.py``. Its ``FRAMEWORKS`` entry has ``registrations=None``.
 
 Run it with ``deltaid train cfg.yaml --framework huggingface``.
 """
 
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Union, cast
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Union, cast
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
+from confluid import Lazy, Mandatory, configurable, flow
 from loggair import get_logger
-from matrainer.artifacts import write_metrics_sidecar
+from matrainer.huggingface.trainer import HuggingFaceRunnable
 from matrainer.metric_functions import accumulate_confusion, iou_per_class, mean_iou, overall_accuracy, zero_confusion
-from matrainer.metric_names import MetricNames, as_metric_names
+from matrainer.metric_names import MetricNames
 from matrainer.metric_slots import merge_metric_specs
-from matrainer.run_names import generate_run_name, run_prefix
-from matrainer.tracking.base import Tracker, as_tracker_list
-from matrainer.tracking.provenance import capture_log_file, log_run_context
-from recordstream import (
-    PredictionsSink,
-    RecordSource,
-    batch_metadata,
-    batch_tensor,
-    collate_records,
-    ensure_materialized,
-    ensure_record_dataset,
-    num_mask_classes,
-    segmentation_output,
-)
-from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint, run_entrypoint
-from torch.utils.data import DataLoader
+from matrainer.tracking.base import Tracker
+from recordstream import RecordSource, batch_tensor, collate_records, segmentation_output
 
-if TYPE_CHECKING:  # pragma: no cover - typing only; the module imports transformers lazily
-    from transformers import Trainer, TrainingArguments
+from deltaid.segmentation_base import SegmentationBase
 
 logger = get_logger(__name__)
 
@@ -81,7 +63,7 @@ __all__ = ["HuggingFaceMetric", "HuggingFaceSegmenter", "SegmenterTask"]
 
 
 @configurable(task="segmentation", role="trainer", framework="huggingface")
-class HuggingFaceSegmenter(TorchRunner, ProgressReporting):
+class HuggingFaceSegmenter(SegmentationBase, HuggingFaceRunnable):
     """Train, evaluate or predict a semantic segmenter with ``transformers.Trainer``.
 
     Args:
@@ -141,76 +123,42 @@ class HuggingFaceSegmenter(TorchRunner, ProgressReporting):
         test_metrics: Optional[List[HuggingFaceMetric]] = None,
         metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
-        super().__init__()
-        self.model: HuggingFaceNetwork = cast(HuggingFaceNetwork, model)
-        self.train_set: Optional[Lazy[RecordSource]] = train_set
-        self.val_set: Optional[Lazy[RecordSource]] = None
-        self.test_set: Optional[Lazy[RecordSource]] = test_set
-        self.task: SegmenterTask = task
+        super().__init__(
+            model=model,
+            train_set=train_set,
+            test_set=test_set,
+            task=task,
+            max_epochs=max_epochs,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            report_to=report_to,
+            output_dir=output_dir,
+            trackers=trackers,
+            callbacks=callbacks,
+            experiment_name=experiment_name,
+            run_name=run_name,
+            input_key=input_key,
+            target_key=target_key,
+            metrics=metrics,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            metric_names=metric_names,
+        )
         self.num_classes = int(num_classes) if num_classes is not None else None
         self.ignore_index = int(ignore_index)
-        self.max_epochs = max_epochs
-        self.batch_size = batch_size
-        # Stored rather than closed over, because `_training_arguments()` reads them at RUN time:
-        # they are the floor it injects into whatever `training_arguments` the config left, so a
-        # post-construction `seg.learning_rate = …` still reaches the Trainer.
-        self.num_workers = int(num_workers)
-        self.learning_rate = float(learning_rate)
-        self.weight_decay = float(weight_decay)
-        self.report_to = report_to
-        self.output_dir = output_dir
-        self.experiment_name = experiment_name
-        self.run_name = run_name if run_name is not None else generate_run_name(prefix=run_prefix(task))
-        self.input_key = str(input_key)
-        self.target_key = str(target_key)
-        self.metrics: Optional[List[HuggingFaceMetric]] = metrics
-        self.val_metrics: Optional[List[HuggingFaceMetric]] = val_metrics
-        self.test_metrics: Optional[List[HuggingFaceMetric]] = test_metrics
-        # All THREE transformers objects are DEFERRED SLOTS, and the targets are STRING dotted
-        # paths: this module has no top-level `import transformers` (the methods that need it
-        # import it in their bodies), and confluid resolves a dotted target at flow time — so the
-        # slots stay declarable without dragging the library into `import deltaid`.
-        self.test_loader: Lazy[DataLoader[Any]] = LazyClass(
-            DataLoader,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            collate_fn=collate_records,
-        )
-        # EMPTY on purpose — every derived knob is applied in `_training_arguments()` instead.
-        # A config overriding this slot REPLACES it whole (that is what a YAML key does), so
-        # pinning the defaults here would mean `training_arguments: {use_cpu: true}` silently
-        # dropped `num_train_epochs`, the batch size AND `remove_unused_columns=False` — the last
-        # of which fails with a `KeyError: 'image'` three frames inside Trainer's collator.
-        self.training_arguments: Lazy["TrainingArguments"] = LazyClass("transformers.TrainingArguments")
-        self.trainer: Lazy["Trainer"] = LazyClass("transformers.Trainer")
-        self.callbacks: Optional[List[Lazy[Any]]] = callbacks
-        self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
-        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
-        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
-        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
-        self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
-        self.metrics_sidecar_path: Optional[str] = None
-        self._computed_metrics: Dict[str, float] = {}
 
-    @property
-    def __needs_autograd__(self) -> bool:  # type: ignore[override]  # dynamic per-task override
-        """Only ``fit`` optimizes — an evaluate/predict run is happy under inference mode."""
-        return self.task == "fit"
+    # ---- setup: num_classes is the task base's; the ignore index is ours -------------------- #
+    def _resolve_task_defaults(self) -> None:
+        """The shared resolution, plus this engine's one placement duty.
 
-    # ---- run dispatch ------------------------------------------------------- #
-    def run(self) -> None:
-        self.initialize()
-        run_entrypoint(self, self.task)
-
-    # ---- setup -------------------------------------------------------------- #
-    def initialize(self) -> None:
-        """Resolve ``num_classes``, build the model, and put the ignore index where it is read."""
-        if self.task == "fit":
-            self._initialize_fit()
-        else:
-            self._initialize_eval()
-        self.model = flow(self.model, num_classes=self.num_classes)
+        Riding this hook rather than overriding ``initialize`` (the fleet rule: a concrete on
+        a shared base extends via hooks) is safe because the task base calls it AFTER the
+        model is flowed, on both the fit and the eval path — exactly when the model's config
+        exists to write onto; ``_apply_ignore_index`` is idempotent like the rest of the hook.
+        """
+        super()._resolve_task_defaults()
         self._apply_ignore_index()
 
     def _apply_ignore_index(self) -> None:
@@ -228,63 +176,15 @@ class HuggingFaceSegmenter(TorchRunner, ProgressReporting):
         if config is not None and hasattr(config, "semantic_loss_ignore_index"):
             config.semantic_loss_ignore_index = self.ignore_index
 
-    def _initialize_fit(self) -> None:
-        self.train_set = self._prepare(self.train_set)
-        self.val_set = self._prepare(self.val_set)
-        self.test_set = self._prepare(self.test_set)
+    def _default_hf_metrics(self) -> Optional[List[Any]]:
+        return list(_DEFAULT_METRICS)
 
-        nc = self._num_classes_without_data()
-        if nc is None:
-            if self.train_set is None:
-                raise RuntimeError(
-                    "could not determine num_classes — set it on the segmenter or the model, or wire a train_set."
-                )
-            logger.info(f"Deriving num_classes from the {self.target_key!r} column (a full pass over the masks)...")
-            nc = num_mask_classes(self.train_set, self.target_key)
-            logger.info(f"Derived num_classes={nc} from the mask column.")
-        self.num_classes = int(nc)
-
-    def _initialize_eval(self) -> None:
-        """Model-driven setup: the trained head's width is authoritative, not the eval split's."""
-        nc = self.num_classes or getattr(self.model, "num_classes", None)
-        if not nc:
-            raise RuntimeError("could not determine num_classes — set it, or wire a model that exposes it.")
-        self.num_classes = int(nc)
-        self.test_set = self._prepare(self.test_set)
-        self.val_set = self._prepare(self.val_set)
-
-    def _prepare(self, source: Optional[Lazy[RecordSource]]) -> Optional[Any]:
-        """Normalize a wired source's TYPE and its STATE, in THIS process (the fork guard)."""
-        if source is None:
-            return None
-        return ensure_materialized(ensure_record_dataset(source))
-
-    def _num_classes_without_data(self) -> Optional[int]:
-        """The class count from the model or the config — everything short of walking the masks."""
-        if not isinstance(self.model, Fluid):
-            model_nc = getattr(self.model, "num_classes", None)
-            if model_nc:
-                return int(model_nc)
-        if self.num_classes is not None:
-            return int(self.num_classes)
-        if isinstance(self.model, Fluid):
-            pinned = self.model.kwargs.get("num_classes")
-            if pinned:
-                return int(pinned)
-        return None
-
-    def _network(self) -> Any:
-        """The live ``transformers`` model — the wrapper's, or a bare one wired directly."""
-        return getattr(self.model, "model", self.model)
-
-    # ---- data --------------------------------------------------------------- #
+    # ---- data ------------------------------------------------------------------------------- #
     def _to_hf_batch(self, records: Sequence[Any]) -> Dict[str, torch.Tensor]:
         """One list of records → the mapping ``Trainer`` feeds the model.
 
-        The keys are transformers' contract, not ours: ``pixel_values`` is what an image model's
-        ``forward`` takes and ``labels`` is what makes it return a loss. ``int64`` is named
-        explicitly for the same reason as every other backend — albumentations returns int32 and
-        the cross-entropy family rejects it.
+        ``int64`` is named explicitly for the same reason as every other backend —
+        albumentations returns int32 and the cross-entropy family rejects it.
         """
         batch = collate_records(list(records))
         return {
@@ -292,69 +192,9 @@ class HuggingFaceSegmenter(TorchRunner, ProgressReporting):
             "labels": batch_tensor(batch, self.target_key, dtype=torch.int64),
         }
 
-    def _record_loader(self, source: Any) -> DataLoader:
-        """A loader of COLLATED RECORD BATCHES — the shape :meth:`predict` needs.
-
-        Prediction pairs each output row with the metadata that travelled beside the image, and
-        :meth:`_to_hf_batch` has already dropped it.
-        """
-        return cast(DataLoader, flow(self.test_loader, dataset=self._prepare(source)))
-
-    # ---- the Trainer -------------------------------------------------------- #
-    def _training_arguments(self) -> Any:
-        """``TrainingArguments`` from the shared knobs — the flat config, in Trainer's words.
-
-        Derived here rather than pinned on the constructor's ``LazyClass`` so that OVERRIDING the
-        slot ADDS to these instead of replacing them. `TrainingArguments` has ~100 fields and a
-        config reaching for one of them (``use_cpu``, gradient accumulation, a warmup schedule)
-        would otherwise lose every knob below — including ``remove_unused_columns=False``, whose
-        absence surfaces as a `KeyError: 'image'` inside Trainer's own collator rather than as
-        anything about the override.
-
-        A key the config pinned WINS: only the ones it did not mention are injected, so this
-        derivation is a floor rather than an override.
-        """
-        # `Dict[str, Any]`, not the inferred `dict[str, object]`: `flow()` has a keyword-only
-        # `solidify: bool`, so a `**` splat of an `object`-valued mapping is a type error there.
-        derived: Dict[str, Any] = {
-            "output_dir": self._output_dir(),
-            "num_train_epochs": self.max_epochs,
-            "per_device_train_batch_size": self.batch_size,
-            "per_device_eval_batch_size": self.batch_size,
-            "learning_rate": self.learning_rate,
-            "weight_decay": self.weight_decay,
-            "dataloader_num_workers": self.num_workers,
-            # A generic map-style source is not a `datasets.Dataset`, so Trainer must not try to
-            # drop "unused" columns by inspecting the model signature — our collate already
-            # produces exactly the two keys the model takes.
-            "remove_unused_columns": False,
-            "report_to": self.report_to,
-            "run_name": self.run_name,
-            "disable_tqdm": True,
-            "save_strategy": "no",
-        }
-        pinned = getattr(self.training_arguments, "kwargs", None) or {}
-        return flow(self.training_arguments, **{k: v for k, v in derived.items() if k not in pinned})
-
-    def _build_trainer(self, train: Any = None, evaluate: Any = None, split: str = "val") -> Any:
-        """Flow the ``Trainer`` with everything only the RUN knows."""
-        return flow(
-            self.trainer,
-            model=self._network(),
-            args=self._training_arguments(),
-            train_dataset=train,
-            eval_dataset=evaluate,
-            data_collator=self._to_hf_batch,
-            compute_metrics=self._metrics_hook(split),
-            callbacks=[flow(cb) for cb in (self.callbacks or [])] or None,
-        )
-
+    # ---- metrics ---------------------------------------------------------------------------- #
     def _metrics_hook(self, split: str) -> Any:
         """Trainer's ``compute_metrics``, bound to ONE split's metric list.
-
-        A ``Trainer`` holds a single hook, so the split is decided where the Trainer is BUILT —
-        ``fit`` evaluates the validation split, ``test`` the held-out one — rather than inside
-        the hook, which cannot tell which dataset it was called on.
 
         **The hook is where the upsample happens**, and that placement is deliberate: the model's
         logits are ``[N, C, H/4, W/4]`` while the labels are ``[N, H, W]``, so aligning them is a
@@ -389,114 +229,20 @@ class HuggingFaceSegmenter(TorchRunner, ProgressReporting):
 
         return compute_metrics
 
-    def _output_dir(self) -> str:
-        """Where Trainer writes its state — beside the sidecar when one is configured."""
-        if self.output_dir:
-            return str(Path(self.output_dir).expanduser())
-        if self.metrics_sidecar_path:
-            return str(Path(self.metrics_sidecar_path).expanduser().parent / self.run_name)
-        return str(Path("./hf_runs") / self.run_name)
+    # ---- predictions ------------------------------------------------------------------------- #
+    def _predict_batch(self, network: Any, batch: Any, device: Any) -> Any:
+        """The forward plus the upsample back to the INPUT resolution.
 
-    # ---- the four entry points ---------------------------------------------- #
-    @entrypoint("fit", role="trainer", primary=True)
-    def fit(self) -> None:
-        logger.info(f"deltaid huggingface training: {self.experiment_name} ({self.run_name})")
-        if self.train_set is None:
-            raise ValueError("HuggingFaceSegmenter.fit() requires a 'train_set'.")
-        # Provenance through matrainer's plain FUNCTIONS — `runnable=self` so the hyperparameters
-        # and the resolved config come from matrainer's ONE derivation.
-        trackers = self._live_trackers()
-        manifest = log_run_context(trackers, runnable=self)
-        trainer = self._build_trainer(train=self.train_set, evaluate=self.val_set)
-        result = trainer.train()
-        names = as_metric_names(self.metric_names)
-        scored = {k: float(v) for k, v in result.metrics.items() if _is_number(v)}
-        if self.val_set is not None:
-            scored.update({k: float(v) for k, v in trainer.evaluate().items() if _is_number(v)})
-        self._computed_metrics = names(scored, source="huggingface")
-        _log_trainer_history(trainer, trackers, names)
-        logger.info(f"Training complete: {self._computed_metrics}")
-        write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
-        # Uploads the log file, stamps the manifest's terminal status AND finalizes every tracker.
-        capture_log_file(trackers, manifest=manifest, status="success")
-
-    @entrypoint("evaluate", role="evaluator")
-    def evaluate(self) -> None:
-        self.test()
-
-    @entrypoint("test", role="evaluator", primary=True)
-    def test(self) -> None:
-        if self.test_set is None:
-            raise ValueError("HuggingFaceSegmenter.test() requires a 'test_set'.")
-        # `metric_key_prefix="test"` rather than Trainer's `eval` default: this pass walks the
-        # HELD-OUT split, and the prefix is the only thing that says so — left at `eval` the run
-        # would report its test scores in the column a validation pass fills.
-        results = self._build_trainer(evaluate=self.test_set, split="test").evaluate(metric_key_prefix="test")
-        self._computed_metrics = as_metric_names(self.metric_names)(
-            {k: float(v) for k, v in results.items() if _is_number(v)}, source="huggingface"
-        )
-        logger.info(f"Evaluation complete: {self._computed_metrics}")
-        write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
-
-    @entrypoint("predict", role="predictor", primary=True)
-    def predict(self) -> None:
-        """Stream per-record predictions to the sink.
-
-        A plain ``torch.no_grad()`` forward rather than ``Trainer.predict``: that returns only the
-        stacked logits, and the sink contract needs each row paired with the metadata from the
-        record it came from.
+        The sink's consumer expects a prediction the size of the image it came from, and this
+        engine is the only one that does not already produce that.
         """
-        if self.test_set is None:
-            raise ValueError("HuggingFaceSegmenter.predict() requires a 'test_set'.")
-        sink = flow(self.predictions_sink)
-        network = self._network().eval()
-        device = next(network.parameters()).device
-        with torch.no_grad():
-            for batch in self._record_loader(self.test_set):
-                images = batch_tensor(batch, self.input_key, device)
-                logits = network(pixel_values=images).logits
-                # Back to the INPUT resolution before anything reads the mask — the sink's
-                # consumer expects a prediction the size of the image it came from, and this
-                # engine is the only one that does not already produce that.
-                logits = F.interpolate(logits, size=images.shape[-2:], mode="bilinear", align_corners=False)
-                if sink is not None:
-                    self._write_predictions(logits, batch, cast(PredictionsSink, sink))
-        if sink is not None and hasattr(sink, "close"):
-            sink.close()
-        logger.info("Prediction complete.")
+        images = batch_tensor(batch, self.input_key, device)
+        logits = network(pixel_values=images).logits
+        return F.interpolate(logits, size=images.shape[-2:], mode="bilinear", align_corners=False)
 
-    # ---- predictions -------------------------------------------------------- #
-    def _write_predictions(self, logits: torch.Tensor, batch: Any, sink: PredictionsSink) -> None:
-        """One :class:`~recordstream.SegmentationOutput` per record, paired with its metadata."""
-        out = segmentation_output(logits)
-        per_record_meta = batch_metadata(batch, exclude=(self.input_key, self.target_key))
-        for i in range(len(out["mask"])):
-            item = {"logits": out["logits"][i], "probs": out["probs"][i], "mask": out["mask"][i]}
-            meta = per_record_meta[i] if per_record_meta and i < len(per_record_meta) else {}
-            sink.write(item, meta)
-
-    # ---- tracking ------------------------------------------------------------ #
-    def _live_trackers(self) -> List[Tracker]:
-        """Normalize and flow the wired trackers ONCE, writing the result back to the slot."""
-        self.trackers = [flow(t) for t in as_tracker_list(self.trackers) or []]
-        return cast(List[Tracker], self.trackers)
-
-    # ---- @outputs ------------------------------------------------------------ #
-    @property
-    @output
-    def trained_model(self) -> Any:
-        """The live trained model (post-run ``@output``). Raises while still deferred."""
-        if isinstance(self.model, Fluid):
-            raise RuntimeError("trained_model is only available after run() — the model is still deferred.")
-        return self.model
-
-    @property
-    @output
-    def computed_metrics(self) -> Dict[str, float]:
-        """Final SCALAR metrics (post-run ``@output``). Raises before ``run()``."""
-        if not self._computed_metrics:
-            raise RuntimeError("computed_metrics is only available after run().")
-        return dict(self._computed_metrics)
+    def _prediction_output(self, preds: Any) -> Any:
+        """The batched :class:`~recordstream.SegmentationOutput` — the machinery slices it."""
+        return segmentation_output(preds)
 
 
 def _upsample_logits(logits: np.ndarray, size: Any) -> np.ndarray:
@@ -565,27 +311,3 @@ def _as_metric(value: HuggingFaceMetric) -> Callable[..., float]:
     if metric is None:
         raise ValueError(f"Unknown metric {built!r}. Known names: {', '.join(sorted(_METRICS))}.")
     return metric
-
-
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def _log_trainer_history(trainer: Any, trackers: Sequence[Tracker], names: MetricNames) -> None:
-    """Forward EVERY logged step to the trackers, not just the final metrics.
-
-    ``Trainer`` accumulates its own ``log_history`` and nothing else sees those rows, so without
-    this a tracked run would show one point per RUN where every other backend shows a curve.
-    """
-    if not trackers:
-        return
-    for entry in getattr(trainer.state, "log_history", []) or []:
-        values = names(
-            {k: float(v) for k, v in entry.items() if _is_number(v) and k != "epoch"},
-            source="huggingface",
-        )
-        if not values:
-            continue
-        step = int(entry.get("step", 0))
-        for tracker in trackers:
-            tracker.log_metrics(values, step=step)
