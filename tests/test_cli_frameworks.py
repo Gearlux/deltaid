@@ -4,6 +4,11 @@ The framework is a property of the CONFIG, not of the CLI, so it is a flag the C
 rather than a subcommand. The checks here are deliberately CONFIG-level — they load the example
 YAML once per declared scope — so a block that drops a slot fails on the machine that introduces
 the mistake, rather than only where that backend's framework happens to be installed.
+
+The MACHINERY (the rewrite, the keras engine pin, the dispatch, the pre-step ORDER) is
+`matrainer.cli`'s since 2026-08-07 and is pinned in matrainer's own `tests/test_cli.py`; what
+stays here is deltaid's half of each seam — the flag against THIS project's spellings, the pin
+against THIS project's tensorflow row, and the table itself.
 """
 
 import inspect
@@ -13,16 +18,16 @@ from typing import Any, List
 
 import confluid
 import pytest
-
-from deltaid.cli import (
-    FRAMEWORKS,
+from matrainer.cli import (
     VERB_TASKS,
-    _normalize_framework_flag,
-    _pin_keras_backend,
-    _requested_framework,
-    app,
-    main,
+    normalize_framework_flag,
+    pin_keras_backend,
+    registration_modules,
+    requested_framework,
+    trainer_main,
 )
+
+from deltaid.cli import FRAMEWORKS, app, main
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "train_unet_oxford_pets.yaml"
 
@@ -64,11 +69,11 @@ def test_the_verbs_build_through_materialize_runnable_not_a_bare_flow() -> None:
     """
     import inspect
 
-    import deltaid.cli as cli
+    import matrainer.cli
 
-    source = inspect.getsource(cli)
-    assert "materialize_runnable" in source
-    assert 'flow_mode="manual"' in source
+    for verb in VERB_TASKS:
+        assert getattr(app._commands[verb], "__liquifai_flow_mode__", None) == "manual"
+    assert "materialize_runnable" in inspect.getsource(matrainer.cli.default_dispatch)
 
 
 # --------------------------------------------------------------------------- #
@@ -87,7 +92,7 @@ def test_the_verbs_build_through_materialize_runnable_not_a_bare_flow() -> None:
 def test_the_requested_framework_is_read_from_argv_in_every_spelling(argv: List[str], expected: str) -> None:
     """Read from argv rather than liquifai because the registrations must be imported BEFORE the
     config loads — the eager `!class:Foo()` form is built during load, earlier than any handler."""
-    assert _requested_framework(argv) == expected
+    assert requested_framework(argv) == expected
 
 
 def test_the_flag_is_rewritten_to_a_scope_never_appended() -> None:
@@ -99,13 +104,13 @@ def test_the_flag_is_rewritten_to_a_scope_never_appended() -> None:
     config grow into a backend it does not have yet.
     """
     argv = ["deltaid", "train", "c.yaml", "--framework", "lightning"]
-    _normalize_framework_flag(argv)
+    normalize_framework_flag(argv)
     assert argv == ["deltaid", "train", "c.yaml", "--scope", "framework=lightning"]
 
 
 def test_an_explicit_scope_spelling_is_left_alone() -> None:
     argv = ["deltaid", "train", "c.yaml", "--scope", "framework=lightning"]
-    _normalize_framework_flag(argv)
+    normalize_framework_flag(argv)
     assert argv == ["deltaid", "train", "c.yaml", "--scope", "framework=lightning"]
 
 
@@ -149,9 +154,8 @@ def test_every_framework_names_registrations_that_import() -> None:
     import importlib
 
     for name, spec in FRAMEWORKS.items():
-        if spec.registrations is None:
-            continue
-        importlib.import_module(spec.registrations)  # raises if the path is wrong
+        for module in registration_modules(spec):
+            importlib.import_module(module)  # raises if the path is wrong
 
 
 # --------------------------------------------------------------------------- #
@@ -165,12 +169,12 @@ def test_the_tensorflow_backend_pins_the_keras_engine_before_anything_imports_ke
     `recordstream.keras` defaults it to the first engine INSTALLED, which is torch on any machine
     that also carries `deltaid[lightning]` — and a torch-backed `keras.Model` cannot be trained
     with `tf.GradientTape`. Without this step EVERY `deltaid train --framework tensorflow` died at
-    `_require_tensorflow_backend()`, because `_register_segmentation` imports
+    `_require_tensorflow_backend()`, because the registration pre-step imports
     `deltaid.keras_segmentation` (there is deliberately no second loss module) and binds the torch
     default before `deltaid._tensorflow` gets to set its own.
     """
     monkeypatch.delenv("KERAS_BACKEND", raising=False)
-    _pin_keras_backend(_requested_framework(["deltaid", "train", "c.yaml", "--framework", "tensorflow"]))
+    pin_keras_backend(requested_framework(["deltaid", "train", "c.yaml", "--framework", "tensorflow"]))
 
     assert os.environ.get("KERAS_BACKEND") == "tensorflow"
 
@@ -178,7 +182,7 @@ def test_the_tensorflow_backend_pins_the_keras_engine_before_anything_imports_ke
 def test_an_explicit_keras_backend_is_never_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
     """`setdefault`, so a deliberate choice survives and the segmenter reports the mismatch."""
     monkeypatch.setenv("KERAS_BACKEND", "jax")
-    _pin_keras_backend("tensorflow")
+    pin_keras_backend("tensorflow")
 
     assert os.environ["KERAS_BACKEND"] == "jax"
 
@@ -187,7 +191,7 @@ def test_an_explicit_keras_backend_is_never_overridden(monkeypatch: pytest.Monke
 def test_no_other_framework_touches_keras_backend(monkeypatch: pytest.MonkeyPatch, framework: Any) -> None:
     """`keras` included: it runs on whichever engine is loaded, which is the whole point of it."""
     monkeypatch.delenv("KERAS_BACKEND", raising=False)
-    _pin_keras_backend(framework)
+    pin_keras_backend(framework)
 
     assert "KERAS_BACKEND" not in os.environ
 
@@ -195,8 +199,11 @@ def test_no_other_framework_touches_keras_backend(monkeypatch: pytest.MonkeyPatc
 def test_the_pin_runs_before_the_registration_import() -> None:
     """Order is the whole fix: the registration import is what binds the wrong engine.
 
-    Read from the SOURCE of `main()` rather than by calling it — calling it would run the app.
+    The order now lives in the shared `trainer_main` (matrainer pins it too); what THIS test
+    keeps is the project's stake in it — `main()` must delegate there, and the shared body must
+    still pin before it registers. Read from SOURCE — calling it would run the app.
     """
-    source = inspect.getsource(main)
+    assert "trainer_main" in inspect.getsource(main), "main() must run the shared pre-step order"
+    body = inspect.getsource(trainer_main).split('"' * 3)[-1]
 
-    assert source.index("_pin_keras_backend") < source.index("_register_segmentation")
+    assert body.index("pin_keras_backend") < body.index("register_frameworks")

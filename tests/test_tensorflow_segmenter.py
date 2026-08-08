@@ -99,7 +99,13 @@ def test_it_is_a_sibling_of_the_keras_backend_not_a_subclass() -> None:
     cls = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "TensorFlowSegmenter")
     bases = [ast.unparse(b) for b in cls.bases]
     assert "KerasSegmenter" not in bases
-    assert "_require_tensorflow_backend" in SOURCE.read_text()
+    # The narrowed precondition (the engine guard) lives on the machinery base since P5.
+    import inspect
+
+    from matrainer.tensorflow.loop import TensorFlowRunnable
+
+    assert "TensorFlowRunnable" in SOURCE.read_text()
+    assert "_require_tensorflow_backend" in inspect.getsource(TensorFlowRunnable.run)
 
 
 def test_there_is_no_second_loss_module_for_this_engine() -> None:
@@ -113,10 +119,11 @@ def test_there_is_no_second_loss_module_for_this_engine() -> None:
 
 
 def test_it_warms_its_sources_and_derives_no_hyperparameters_of_its_own() -> None:
+    """Both live on the shared bases since P5 — the module must not shadow the wiring."""
     source = SOURCE.read_text()
-    assert "ensure_materialized" in source
+    assert "SegmentationKerasHooks" in source and "TensorFlowRunnable" in source
+    assert "def initialize" not in source and "def _callbacks" not in source
     assert "_config_params" not in source
-    assert "runnable=self" in source
 
 
 # --------------------------------------------------------------------------- #
