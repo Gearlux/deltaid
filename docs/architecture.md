@@ -834,8 +834,8 @@ plus its own full flat constructor (the confluid introspection surface, signatur
 the fleet drift tests now check "inherits the shared base and does not shadow its wiring"
 instead of per-module source patterns; matrainer is load-bearing for training (the old
 "removing it keeps the class training" claim is dead by design). The other engine backends
-still carry their private copies until their family's migration phase lands (root workspace
-backlog).
+joined family by family through 2026-08-08, when the migration COMPLETED — every backend
+now composes its task hooks with a shared machinery base (see the closing amendment below).
 
 **Example.**
 
@@ -850,6 +850,20 @@ class LightningSegmenter(SegmentationTorchHooks, LightningRunnable):
 **Amendment (2026-08-07).** The bare-torch backend joined the same shape: ``TorchSegmenter`` is `(SegmentationTorchHooks, matrainer.torch.TorchLoopRunnable)` — the same task hooks, a different machinery base (the owned epoch loop instead of a `pl.Trainer`), and NOTHING else: the concrete is the flat constructor alone.
 
 **Amendment (2026-08-07, second).** The fastai backend joined: ``FastaiSegmenter`` is `(SegmentationTorchHooks, matrainer.fastai.FastaiRunnable)` — the same task hooks, the Learner machinery base, plus the task's fastai vocabulary as hooks (`CrossEntropyLossFlat(axis=1)` as the default, the DiceMulti/JaccardCoeffMulti pair, the `pixel_accuracy` alias). Its `evaluate` was harmonized to score the VAL split.
+
+**Amendment (2026-08-07/08, closing — P5 + P6, the migration completes).** The remaining five
+backends joined and the fleet is DONE. P5 (keras family): ``KerasSegmenter`` and
+``TensorFlowSegmenter`` compose `segmentation_keras.py`'s hooks with the two keras-family
+machinery siblings (`matrainer.keras.KerasRunnable` / `matrainer.tensorflow.TensorFlowRunnable`),
+which also fixed the TF loop's missing per-epoch reshuffle. P6: ``HuggingFaceSegmenter`` is
+``(SegmentationBase, matrainer.huggingface.HuggingFaceRunnable)`` (the upsample-in-the-hook,
+the int64 mask collate and the `semantic_loss_ignore_index` placement stay here — the last
+riding `_resolve_task_defaults`, the fleet's no-initialize-shadow rule), and ``JaxSegmenter``
+/ ``MlxSegmenter`` are ``(SegmentationBase, matrainer.jax.JaxLoopRunnable)`` / ``(…,
+matrainer.mlx.MlxLoopRunnable)`` with the ignore-masked loss and the confusion/per-class-vector
+reporting as the machinery's split-state hooks; their eval path overrides `_initialize_eval`
+to inject the width BEFORE the flow (a deferred spec U-Net cannot build without it). Every
+`evaluate` scores the VAL split, fleet-wide.
 
 **What you may change.** Hook implementations and task state freely; the concrete signature
 (it is the config surface). What you may not do: shadow the inherited machinery
