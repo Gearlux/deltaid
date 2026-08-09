@@ -196,6 +196,25 @@ class TestKerasUNetMatchesTheSpec:
         out = model(np.zeros((2, 64, 64, 3), dtype="float32"))
         assert tuple(out.shape) == (2, 64, 64, 3)
 
+    def test_the_seed_actually_reproduces_the_weights(self) -> None:
+        """The knob is only worth having if it BINDS — assert on the built weights, not the API.
+
+        KerasUNet was the ONE spec implementation without a seed (2026-08-08): its four siblings
+        all carried one, so the keras sweep row was the only one that moved between identical
+        runs — the raidar `KerasFcos` story replayed, and the same fix.
+        """
+        import numpy as np
+
+        from deltaid.unet.keras_unet import KerasUNet
+
+        def first_kernel(seed: int) -> Any:
+            model = KerasUNet(num_classes=3, widths=(8, 16), seed=seed)
+            return np.asarray(model.solidify().get_weights()[0])
+
+        a, b, other = first_kernel(0), first_kernel(0), first_kernel(1)
+        assert np.array_equal(a, b), "the same seed must rebuild the same weights"
+        assert not np.array_equal(a, other), "a different seed must not — else it is seeding nothing"
+
 
 class TestTensorFlowUNetMatchesTheSpec:
     @pytest.mark.parametrize("num_classes", [2, 3, 10])

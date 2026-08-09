@@ -52,6 +52,9 @@ class KerasUNet(keras.Model):
         widths: Channels per encoder level. Changing it breaks comparability with the other
             implementations — see :mod:`deltaid.unet.spec`.
         bottleneck_width: Channels at the bottom of the U.
+        seed: Seed applied before the build, so a config reproduces its weights — the same knob
+            its four sibling implementations carry, and the reason this engine was the one whose
+            sweep row moved between identical runs.
     """
 
     def __init__(
@@ -60,6 +63,7 @@ class KerasUNet(keras.Model):
         input_shape: Tuple[int, int, int] = INPUT_SHAPE,
         widths: Tuple[int, ...] = ENCODER_WIDTHS,
         bottleneck_width: int = BOTTLENECK_WIDTH,
+        seed: int = 0,
     ) -> None:
         # Lazy: store only, and `super().__init__()` FIRST — a `keras.Layer` refuses attribute
         # assignment before it.
@@ -68,6 +72,7 @@ class KerasUNet(keras.Model):
         self.input_shape = tuple(input_shape)
         self.widths = tuple(widths)
         self.bottleneck_width = bottleneck_width
+        self.seed = int(seed)
         self._model: Optional[Any] = None
 
     def solidify(self) -> Any:
@@ -79,6 +84,11 @@ class KerasUNet(keras.Model):
                 "KerasUNet.num_classes is not set — a segmenter flows the resolved count in at "
                 "run time, or set it explicitly."
             )
+        # Seeded like every sibling implementation, and for the same reason: an unseeded run is
+        # not comparable to itself, so a refactor cannot be checked by re-running it. Keras owns
+        # no per-layer seed argument the way raw TF does, so this is the global call its own
+        # docs prescribe — it covers the initializers of every layer built below.
+        keras.utils.set_random_seed(self.seed)
         # `(None, None, C)`, NOT the configured `(H, W, C)`. A U-Net is fully convolutional, so
         # the torch implementation accepts any size the encoder can halve cleanly — and Keras's
         # Functional API PINS the spatial dims unless they are None, so building at the
