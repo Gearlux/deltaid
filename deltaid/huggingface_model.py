@@ -52,6 +52,10 @@ class HuggingFaceSegmentationModel:
             its config with fresh weights, which keeps a first run offline and reproducible.
         trust_remote_code: Allow a Hub repo to execute its own modelling code. Off by default
             because it runs code from the internet; turn it on only for a repo you trust.
+        seed: Seed for torch's global RNG, set when the model is BUILT — a pretrained load
+            still randomly reinitializes the ``num_labels`` head, and ``TrainingArguments.seed``
+            applies only when training starts, too late to cover it. Applied WITHOUT restoring
+            the RNG state (the workspace wrapper-seeding idiom).
     """
 
     def __init__(
@@ -60,12 +64,14 @@ class HuggingFaceSegmentationModel:
         num_classes: int = 0,
         pretrained: bool = True,
         trust_remote_code: bool = False,
+        seed: int = 0,
     ) -> None:
         # Lazy: store only. No Hub call, no download — the workspace zero-arg mandate.
         self.model_name = model_name
         self.num_classes = int(num_classes)
         self.pretrained = pretrained
         self.trust_remote_code = trust_remote_code
+        self.seed = int(seed)
         self._model: Optional[Any] = None
 
     def solidify(self) -> Any:
@@ -79,7 +85,14 @@ class HuggingFaceSegmentationModel:
                 f"HuggingFaceSegmentationModel.num_classes must be >= 1 to build (got {self.num_classes}) — "
                 "set it explicitly, or let the segmenter derive it."
             )
+        import torch
         from transformers import AutoConfig, AutoModelForSemanticSegmentation
+
+        # Seeded BEFORE the build (the restoration project's 2026-08-06 idiom): a pretrained
+        # load still randomly reinitializes the `num_labels` head (`ignore_mismatched_sizes`),
+        # and `TrainingArguments.seed` applies only when TRAINING starts — too late to cover
+        # it (the detection project measured a 3.4x metric spread from exactly this ordering).
+        torch.manual_seed(self.seed)
 
         if self.pretrained:
             # `ignore_mismatched_sizes` is what makes fine-tuning possible at all: the checkpoint's

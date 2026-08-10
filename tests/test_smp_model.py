@@ -160,3 +160,22 @@ class TestTheWrapperContract:
         assert smp.create_model("unet", encoder_name="resnet18", encoder_weights=None, classes=3) is not None
         out = _tiny(arch="unet")(torch.zeros(2, 3, 60, 60))  # not a multiple of 32 — and fine
         assert out.shape == (2, 3, 60, 60)
+
+
+def test_the_seed_actually_reproduces_the_weights() -> None:
+    """The knob is only worth having if it BINDS — assert on the built weights, not the API.
+
+    The decoder is always a fresh random init, so the zoo sweep rows moved between identical
+    runs (2026-08-09) until the wrapper seeded its build — the restoration project's 2026-08-06
+    wrapper-seeding idiom, applied here.
+    """
+    import torch
+
+    def first_param(seed: int) -> torch.Tensor:
+        model = _tiny(seed=seed)
+        model.solidify()
+        return next(model.parameters()).detach().clone()
+
+    a, b, other = first_param(0), first_param(0), first_param(1)
+    assert torch.equal(a, b), "the same seed must rebuild the same weights"
+    assert not torch.equal(a, other), "a different seed must not — else it is seeding nothing"
