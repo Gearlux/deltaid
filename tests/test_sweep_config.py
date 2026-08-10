@@ -255,6 +255,11 @@ def test_every_row_reports_pixel_accuracy_too() -> None:
 
 
 def test_the_sweep_writes_everything_under_one_tree() -> None:
-    """Eleven runs must not scatter exports and Trainer checkpoints across the project root."""
-    assert resolve("tensorflow", "unet")["runnable"].kwargs["export_dir"].startswith("./sweep_logs/")
-    assert resolve("huggingface")["runnable"].kwargs["output_dir"].startswith("./sweep_logs/")
+    """Eleven runs must not scatter exports and Trainer checkpoints across the project root.
+
+    The tree is `runs/` — the ONE gitignored output root every project carries (workspace
+    `AGENTS.md`, "Run Output Lands In A Gitignored `runs/`"). `sweep_logs/` keeps only the
+    driver's per-cell `.log` files; everything a RUN produces belongs here.
+    """
+    assert resolve("tensorflow", "unet")["runnable"].kwargs["export_dir"].startswith("./runs/")
+    assert resolve("huggingface")["runnable"].kwargs["output_dir"].startswith("./runs/")
