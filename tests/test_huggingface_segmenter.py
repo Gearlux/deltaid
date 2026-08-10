@@ -340,3 +340,25 @@ class TestTheLoop:
     def test_the_outputs_raise_before_a_run(self) -> None:
         with pytest.raises(RuntimeError, match="only available after run"):
             _ = _segmenter().computed_metrics
+
+
+class TestTheModelWrapperSeedsItsBuild:
+    """`torch.manual_seed` BEFORE the transformers build — a pretrained load still randomly
+    reinitializes the `num_labels` head, and `TrainingArguments.seed` applies only when
+    TRAINING starts, too late to cover it (the detection project measured a 3.4x metric spread
+    from exactly this ordering). Source-order pinned rather than built, because building the
+    wrapper fetches a Hub config."""
+
+    def test_the_seed_is_applied_before_either_build_branch(self) -> None:
+        from deltaid.huggingface_model import HuggingFaceSegmentationModel
+
+        body = inspect.getsource(HuggingFaceSegmentationModel.solidify).split('"""')[-1]
+        assert "torch.manual_seed(self.seed)" in body, "solidify() must apply the declared seed"
+        seed_at = body.index("torch.manual_seed(self.seed)")
+        assert seed_at < body.index("from_pretrained"), "the pretrained branch builds before the seed"
+        assert seed_at < body.index("from_config"), "the from-scratch branch builds before the seed"
+
+    def test_the_knob_is_stored_verbatim(self) -> None:
+        from deltaid.huggingface_model import HuggingFaceSegmentationModel
+
+        assert HuggingFaceSegmentationModel(seed=7).seed == 7

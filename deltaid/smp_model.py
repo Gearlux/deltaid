@@ -40,6 +40,7 @@ from typing import Any, List, Literal, Optional, cast, get_args
 from urllib.parse import quote, urlencode
 
 import segmentation_models_pytorch as smp
+import torch
 import torch.nn as nn
 from confluid import configurable
 from loggair import get_logger
@@ -104,6 +105,11 @@ class SegmentationModelPytorch(nn.Module):
         num_classes: Output channel count, background included. **Required to build** — ``0`` (the default) means unset.
         in_channels: Input channel count. Defaults to 3 (RGB).
         checkpoint_path: Optional Lightning ``.ckpt`` / state-dict to load after the model is built; ``""`` = none.
+        seed: Seed for torch's global RNG, set when the model is BUILT — the decoder is always a
+            fresh random init (and with ``encoder_weights: null`` the encoder too), so an
+            unseeded run is not comparable to itself. Applied WITHOUT restoring the RNG state
+            (the workspace wrapper-seeding idiom): a run-level seed at the earliest useful
+            moment, covering the loader shuffle too.
         kwargs: Any further smp constructor knob, forwarded VERBATIM (``decoder_channels``, ``encoder_depth``, …).
 
     Attributes:
@@ -124,6 +130,7 @@ class SegmentationModelPytorch(nn.Module):
         num_classes: int = 0,
         in_channels: int = 3,
         checkpoint_path: str = "",
+        seed: int = 0,
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -137,6 +144,7 @@ class SegmentationModelPytorch(nn.Module):
         self.num_classes = int(num_classes)
         self.in_channels = int(in_channels)
         self.checkpoint_path = checkpoint_path
+        self.seed = int(seed)
         self.checkpoint_strict: bool = False
         # Forwarded verbatim to `create_model` at build time (the pass-through mandate: this
         # wrapper must not shadow smp's names or silently rewrite its defaults).
@@ -184,6 +192,11 @@ class SegmentationModelPytorch(nn.Module):
                     f"(got {self.num_classes}) — set it explicitly, or let the segmenter derive it "
                     "from the dataset."
                 )
+            # Seeded like every sibling wrapper (the restoration project's 2026-08-06 idiom):
+            # the decoder head is always a fresh random init, so an unseeded run is not
+            # comparable to itself. Deliberately not restored — the build happens once, before
+            # any training randomness is drawn.
+            torch.manual_seed(self.seed)
             self.segmenter = smp.create_model(
                 arch=self.arch,
                 encoder_name=self.encoder_name,
