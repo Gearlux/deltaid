@@ -93,21 +93,21 @@ tensorboard: !scope:tracker=tensorboard
     - !class:matrainer.TensorBoardTracker
       experiment_name: !ref:experiment_name
       run_name: !ref:run_name
-      save_dir: ./sweep_logs/tensorboard
+      save_dir: ./runs/tensorboard
 
 csv: !scope:tracker=csv
   trackers:
     - !class:matrainer.CsvTracker
       experiment_name: !ref:experiment_name
       run_name: !ref:run_name
-      save_dir: ./sweep_logs/csv
+      save_dir: ./runs/csv
 
 aim: !scope:tracker=aim
   trackers:
     - !class:matrainer.AimTracker
       experiment_name: !ref:experiment_name
       run_name: !ref:run_name
-      save_dir: ./sweep_logs/aim
+      save_dir: ./runs/aim
 
 clearml: !scope:tracker=clearml
   trackers:
@@ -122,7 +122,7 @@ wandb: !scope:tracker=wandb
     - !class:matrainer.WandbTracker
       experiment_name: !ref:experiment_name
       run_name: !ref:run_name
-      save_dir: ./sweep_logs/wandb
+      save_dir: ./runs/wandb
 
 # ===========================================================================
 # What the results are CALLED
@@ -200,7 +200,7 @@ fastai: !scope:framework=fastai
       - pixel_accuracy
 
 # tensorflow — the example's block, plus the SavedModel export a sweep can afford to keep, under
-# `sweep_logs/` with everything else this run writes. Restated in full and not merely extended:
+# `runs/` with everything else this run writes. Restated in full and not merely extended:
 # `include:` deep-merges MAPPINGS, and a `!scope:` parses to a `ScopeBlock` rather than a dict, so
 # an overlay block sharing a key REPLACES the included one wholesale. A block here holding only
 # `export_dir` would have dropped the runnable, the model AND the channels-last preprocess chain,
@@ -210,7 +210,7 @@ tensorflow: !scope:framework=tensorflow
   runnable: !class:deltaid.TensorFlowSegmenter
     jit_compile: false
     prefetch: true
-    export_dir: ./sweep_logs/exported/oxford_pets_unet
+    export_dir: ./runs/exported/oxford_pets_unet
   model: !lazy:deltaid.TensorFlowUNet
     input_shape: [224, 224, 3]
   preprocess:
@@ -229,7 +229,7 @@ tensorflow: !scope:framework=tensorflow
       mean: [0.485, 0.456, 0.406]
       std: [0.229, 0.224, 0.225]
 
-# huggingface — the example's block with `output_dir` pointed at the sweep's own tree, so eleven
+# huggingface — the example's block with `output_dir` pointed at the run tree (`runs/`), so eleven
 # runs do not scatter `Trainer` checkpoints beside the metrics sidecars. Restated in full for the
 # replace-not-merge reason above; `use_cpu: true` is the example's measured MPS workaround and is
 # carried over verbatim (delete it on a CUDA box).
@@ -237,7 +237,7 @@ huggingface: !scope:framework=huggingface
   runnable: !class:deltaid.HuggingFaceSegmenter
     learning_rate: 0.00006
     metrics: [mean_iou, pixel_accuracy]
-    output_dir: ./sweep_logs/hf_runs
+    output_dir: ./runs/hf_runs
     training_arguments: !lazy:transformers.TrainingArguments
       use_cpu: true
   model: !lazy:deltaid.HuggingFaceSegmentationModel

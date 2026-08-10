@@ -298,7 +298,7 @@ keras: !scope:framework=keras
   #
   # callbacks:
   #   - !class:keras.callbacks.EarlyStopping { patience: 3 }
-  #   - !class:keras.callbacks.CSVLogger { filename: ./keras_logs/history.csv }
+  #   - !class:keras.callbacks.CSVLogger { filename: ./runs/keras_logs/history.csv }
 
 # --- tensorflow: the same channels-last data, a native loop -----------------
 # The fair question this block answers: why, when `KERAS_BACKEND=tensorflow
@@ -317,7 +317,7 @@ tensorflow: !scope:framework=tensorflow
     # TensorFlow-only knobs, none of which the other backends have an equivalent for.
     jit_compile: false             # XLA on the step functions
     prefetch: true                 # tf.data's AUTOTUNE overlap
-    # export_dir: ./exported/oxford_pets_unet   # a SavedModel, written after fit()
+    # export_dir: ./runs/exported/oxford_pets_unet   # a SavedModel, written after fit()
   model: !lazy:deltaid.TensorFlowUNet
     input_shape: [224, 224, 3]
   preprocess:

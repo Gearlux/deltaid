@@ -667,7 +667,7 @@ csv: !scope:tracker=csv
     - !class:matrainer.CsvTracker
       experiment_name: !ref:experiment_name    # never a literal — it would drift from the run
       run_name: !ref:run_name
-      save_dir: ./sweep_logs/csv
+      save_dir: ./runs/csv
 ```
 
 **What you may change.** A ninth backend adds a row to `MATRIX` in `tests/test_sweep_config.py`
