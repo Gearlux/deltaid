@@ -170,7 +170,7 @@ class MlxUNet(nn.Module):
     ) -> None:
         # `nn.Module.__init__` first — it initialises the dict every attribute lands in.
         super().__init__()
-        # Lazy: store only. These are ints/tuples, which MLX's parameter filter admits only for
+        # Partial: store only. These are ints/tuples, which MLX's parameter filter admits only for
         # dict/list/array, so none of them is mistaken for a weight.
         self.num_classes = num_classes
         self.input_shape = tuple(input_shape)

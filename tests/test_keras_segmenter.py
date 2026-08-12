@@ -17,7 +17,7 @@ from typing import Any, Dict, List, cast
 
 import numpy as np
 import pytest
-from confluid import LazyClass, lazy_param_names, to_pydantic
+from confluid import PartialClass, partial_param_names, to_pydantic
 from recordstream import Mask, collate_records
 
 from deltaid._keras import keras
@@ -221,8 +221,8 @@ class TestParityWithTheReferenceBackend:
     def test_num_classes_resolution_agrees(self) -> None:
         """Model head wins; explicit next; a `!lazy:` model's pinned kwarg next; the mask walk last."""
         assert _resolved(_segmenter(model=_TinyNet(num_classes=5), num_classes=9)) == 5
-        assert _resolved(_segmenter(model=LazyClass(_TinyNet, num_classes=4), num_classes=None)) == 4
-        assert _resolved(_segmenter(model=LazyClass(_TinyNet), num_classes=None, train_set=_records())) == 3
+        assert _resolved(_segmenter(model=PartialClass(_TinyNet, num_classes=4), num_classes=None)) == 4
+        assert _resolved(_segmenter(model=PartialClass(_TinyNet), num_classes=None, train_set=_records())) == 3
 
     def test_it_uses_the_shared_combination_rule(self) -> None:
         """One rule across every backend AND both tasks — never re-derived per backend. Since
@@ -246,7 +246,7 @@ class TestParityWithTheReferenceBackend:
         assert {"metrics", "train_metrics", "val_metrics", "test_metrics"} <= set(fields)
 
     def test_the_deferred_slots_are_declared_lazy(self) -> None:
-        assert {"model", "train_set", "optimizer", "loss"} <= lazy_param_names(KerasSegmenter)
+        assert {"model", "train_set", "optimizer", "loss"} <= partial_param_names(KerasSegmenter)
 
     def test_no_local_hyperparameter_derivation_survives(self) -> None:
         """`runnable=self` rides the FAMILY base's `_callbacks` since P5 — the concrete must
@@ -264,7 +264,7 @@ class TestParityWithTheReferenceBackend:
 # --------------------------------------------------------------------------- #
 class TestTheLoop:
     def test_fit_trains_and_reports_both_splits(self) -> None:
-        seg = _segmenter(train_set=_records(8), model=LazyClass(_TinyNet))
+        seg = _segmenter(train_set=_records(8), model=PartialClass(_TinyNet))
         seg.val_set = _records(4)
         seg.run()
         # What LEAVES the run is canonical; `_history` keeps Keras's own columns.
@@ -275,7 +275,7 @@ class TestTheLoop:
         """A finite loss is not evidence of training — a badly wired one stays finite too, which
         is precisely the `from_logits` failure mode. Learnable data, or the loss would sit at
         ln(C) however well the run was wired."""
-        seg = _segmenter(train_set=_records(8, learnable=True), model=LazyClass(_TinyNet), max_epochs=12)
+        seg = _segmenter(train_set=_records(8, learnable=True), model=PartialClass(_TinyNet), max_epochs=12)
         seg.run()
         losses = seg.history["loss"]
         assert len(losses) == 12
@@ -341,13 +341,13 @@ class TestTheLoop:
         target = tmp_path / "nested" / "history.csv"
         seg = _segmenter(
             train_set=_records(4),
-            model=LazyClass(_TinyNet),
+            model=PartialClass(_TinyNet),
             callbacks=[keras.callbacks.CSVLogger(filename=str(target))],
         )
         seg.run()
         assert target.exists()
 
     def test_the_outputs_raise_before_a_run(self) -> None:
-        seg = _segmenter(model=LazyClass(_TinyNet))
+        seg = _segmenter(model=PartialClass(_TinyNet))
         with pytest.raises(RuntimeError, match="only available after run"):
             _ = seg.computed_metrics

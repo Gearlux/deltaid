@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 import torch
 import torch.nn as nn
-from confluid import LazyClass, lazy_param_names, to_pydantic
+from confluid import PartialClass, partial_param_names, to_pydantic
 from recordstream import Mask, Stream
 
 fastai = pytest.importorskip("fastai")
@@ -264,8 +264,8 @@ class TestForkSafety:
 class TestParity:
     def test_num_classes_resolution_agrees(self) -> None:
         assert _resolved(_segmenter(model=_TinyNet(num_classes=5), num_classes=9)) == 5
-        assert _resolved(_segmenter(model=LazyClass(_TinyNet, num_classes=4), num_classes=None)) == 4
-        assert _resolved(_segmenter(model=LazyClass(_TinyNet), num_classes=None, train_set=_records())) == 3
+        assert _resolved(_segmenter(model=PartialClass(_TinyNet, num_classes=4), num_classes=None)) == 4
+        assert _resolved(_segmenter(model=PartialClass(_TinyNet), num_classes=None, train_set=_records())) == 3
 
     def test_it_reuses_the_same_model_wrapper_as_every_torch_backend(self) -> None:
         """fastai runs on torch, so the model slot takes any nn.Module — the config's `model:`
@@ -317,14 +317,14 @@ class TestParity:
         divergence is exactly one kwarg: `collate_fn=self._to_tuple`, because fastai unpacks a
         batch POSITIONALLY."""
         seg = _segmenter()
-        assert {"train_loader", "val_loader", "test_loader"} <= lazy_param_names(FastaiSegmenter)
+        assert {"train_loader", "val_loader", "test_loader"} <= partial_param_names(FastaiSegmenter)
         assert cast(Any, seg.train_loader).kwargs["collate_fn"] == seg._to_tuple
 
     def test_fastais_own_objects_are_deferred_slots_too(self) -> None:
         """Everything this backend CONSTRUCTS should be reachable from config — otherwise every
         knob it does not restate (a DataLoaders device, a Learner's `moms` / `splitter`) is
         unreachable from YAML."""
-        assert {"dataloaders", "learner"} <= lazy_param_names(FastaiSegmenter)
+        assert {"dataloaders", "learner"} <= partial_param_names(FastaiSegmenter)
 
     def test_trackers_and_callbacks_are_constructor_params(self) -> None:
         fields = to_pydantic(FastaiSegmenter).model_fields
@@ -351,7 +351,7 @@ class TestParity:
         tree = ast.parse(Path(inspect.getfile(FastaiSegmenter)).read_text())
         init = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "__init__")
         model = next(a for a in init.args.args if a.arg == "model")
-        assert model.annotation is not None and "Lazy[Any]" not in ast.unparse(model.annotation)
+        assert model.annotation is not None and "Partial[Any]" not in ast.unparse(model.annotation)
 
 
 def _resolved(seg: FastaiSegmenter) -> int:
@@ -384,7 +384,7 @@ class TestTheBatchBoundary:
 # --------------------------------------------------------------------------- #
 class TestEndToEnd:
     def test_fit_trains_and_reports_the_metrics_by_name(self) -> None:
-        seg = _segmenter(train_set=_records(8), model=LazyClass(_TinyNet), max_epochs=2)
+        seg = _segmenter(train_set=_records(8), model=PartialClass(_TinyNet), max_epochs=2)
         seg.val_set = _records(4)
         seg.run()
         # The Recorder's columns, translated: `valid_loss` is the val loss and its unprefixed
@@ -394,7 +394,7 @@ class TestEndToEnd:
     def test_a_missing_val_set_warns_rather_than_failing(self) -> None:
         """A `Learner` always validates — there is no "skip the val loop" mode — so the training
         data is reused and the metrics measure fit, not generalization. Worth saying out loud."""
-        seg = _segmenter(train_set=_records(4), model=LazyClass(_TinyNet))
+        seg = _segmenter(train_set=_records(4), model=PartialClass(_TinyNet))
         seg.run()  # no val_set wired
         assert seg.computed_metrics
 

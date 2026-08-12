@@ -14,7 +14,7 @@ import pytest
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
-from confluid import Fluid, LazyClass, lazy_param_names, to_pydantic
+from confluid import Fluid, PartialClass, partial_param_names, to_pydantic
 from recordstream import Mask, collate_records, per_record_predictions
 
 from deltaid.lightning_segmenter import LightningSegmenter
@@ -88,25 +88,25 @@ class TestNumClassesResolution:
         assert seg.num_classes == 5
 
     def test_a_lazy_models_pinned_kwarg_is_read_without_touching_the_data(self) -> None:
-        seg = _segmenter(model=LazyClass(_TinyNet, num_classes=4), num_classes=None)
+        seg = _segmenter(model=PartialClass(_TinyNet, num_classes=4), num_classes=None)
         seg.initialize()
         assert seg.num_classes == 4
 
     def test_it_falls_back_to_walking_the_mask_column(self) -> None:
         """The last resort, and the reason `num_mask_classes` exists: a per-pixel target is an
         array, so `recordstream.num_classes` (scalar-only, deliberately) cannot answer this."""
-        seg = _segmenter(model=LazyClass(_TinyNet), num_classes=None, train_set=_records(classes=3))
+        seg = _segmenter(model=PartialClass(_TinyNet), num_classes=None, train_set=_records(classes=3))
         seg.initialize()
         assert seg.num_classes == 3
 
     def test_the_derived_count_is_injected_into_the_lazy_model(self) -> None:
-        seg = _segmenter(model=LazyClass(_TinyNet), num_classes=None, train_set=_records(classes=3))
+        seg = _segmenter(model=PartialClass(_TinyNet), num_classes=None, train_set=_records(classes=3))
         seg.initialize()
         assert not isinstance(seg.model, Fluid)
         assert seg.model.num_classes == 3
 
     def test_it_raises_when_nothing_can_supply_a_count(self) -> None:
-        seg = _segmenter(model=LazyClass(_TinyNet), num_classes=None, train_set=None)
+        seg = _segmenter(model=PartialClass(_TinyNet), num_classes=None, train_set=None)
         with pytest.raises(RuntimeError, match="could not determine num_classes"):
             seg.initialize()
 
@@ -168,7 +168,7 @@ class TestPerSplitMetrics:
     def test_a_split_slot_ADDS_to_the_shared_set_for_that_split_only(self) -> None:
         from torchmetrics.classification import MulticlassAccuracy
 
-        seg = _segmenter(val_metrics={"accuracy": LazyClass(MulticlassAccuracy)})
+        seg = _segmenter(val_metrics={"accuracy": PartialClass(MulticlassAccuracy)})
         seg.initialize()
         assert set(seg.val_metrics.keys()) == {"val/mean_iou", "val/dice_macro", "val/accuracy"}
         assert set(seg.train_metrics.keys()) == {"train/mean_iou", "train/dice_macro"}
@@ -259,7 +259,7 @@ class TestTheTrainingSplitReducesOncePerEpoch:
 
         tracker = _RecordingTracker()
         seg = self._fed(
-            train_metrics={"iou_per_class": LazyClass(MulticlassJaccardIndex, average=None)},
+            train_metrics={"iou_per_class": PartialClass(MulticlassJaccardIndex, average=None)},
             trackers=[tracker],
         )
         seg.log_dict = lambda *a, **k: None  # type: ignore[method-assign]
@@ -296,7 +296,7 @@ class TestTrackers:
     def test_the_constructor_stores_them_verbatim(self) -> None:
         """Normalizing in the constructor would iterate the value, and a deferred `Fluid` is not
         iterable (`'Class' object is not iterable`) — plus it would be functional work."""
-        marker = LazyClass(_TinyNet)
+        marker = PartialClass(_TinyNet)
         seg = _segmenter(trackers=marker)
         assert seg.trackers is marker
 
@@ -305,7 +305,7 @@ class TestTrackers:
         call — two MLflow runs for one training run."""
         from matrainer import CsvTracker
 
-        seg = _segmenter(trackers=LazyClass(CsvTracker))
+        seg = _segmenter(trackers=PartialClass(CsvTracker))
         first = seg._live_trackers()
         assert seg._live_trackers()[0] is first[0]
 
@@ -450,7 +450,7 @@ class TestDispatchAndContract:
         assert _segmenter(task="predict").__needs_autograd__ is False
 
     def test_the_outputs_raise_before_a_run(self) -> None:
-        seg = _segmenter(model=LazyClass(_TinyNet))
+        seg = _segmenter(model=PartialClass(_TinyNet))
         with pytest.raises(RuntimeError, match="only available after run"):
             _ = seg.trained_model
 
@@ -459,7 +459,7 @@ class TestDispatchAndContract:
             LightningSegmenter()  # type: ignore[call-arg]
 
     def test_every_flowed_slot_is_lazy_declared(self) -> None:
-        assert {"model", "train_set", "optimizer", "lightning"} <= lazy_param_names(LightningSegmenter)
+        assert {"model", "train_set", "optimizer", "lightning"} <= partial_param_names(LightningSegmenter)
 
 
 # --------------------------------------------------------------------------- #
@@ -467,7 +467,7 @@ class TestDispatchAndContract:
 # --------------------------------------------------------------------------- #
 class TestEndToEnd:
     def test_fit_trains_computes_metrics_and_exposes_them(self) -> None:
-        seg = _segmenter(train_set=_records(8), model=LazyClass(_TinyNet))
+        seg = _segmenter(train_set=_records(8), model=PartialClass(_TinyNet))
         seg.val_set = _records(4)
         seg.run()
 
@@ -498,7 +498,7 @@ class TestEndToEnd:
                 # under names of their own so the canonical one is the plain quantity.
                 losses.append(float(trainer.callback_metrics["train/loss"]))
 
-        seg = _segmenter(train_set=learnable, model=LazyClass(_TinyNet))
+        seg = _segmenter(train_set=learnable, model=PartialClass(_TinyNet))
         cast(Any, seg.lightning).kwargs.update(max_epochs=12, callbacks=[_Recorder()])
         seg.run()
 
@@ -573,7 +573,7 @@ class TestThePerClassReport:
         from torchmetrics.classification import MulticlassJaccardIndex
 
         seg = _segmenter(
-            val_metrics={"iou_per_class": LazyClass(MulticlassJaccardIndex, average=None)},
+            val_metrics={"iou_per_class": PartialClass(MulticlassJaccardIndex, average=None)},
             **kwargs,
         )
         seg.initialize()

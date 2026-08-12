@@ -35,7 +35,7 @@ native-TensorFlow sibling never needs it — it pins the engine.
 from typing import Any, List, Optional, Sequence, cast
 
 import numpy as np
-from confluid import Lazy
+from confluid import Partial
 from loggair import get_logger
 from matrainer.keras.runnable import KerasLoss, KerasMetric
 from recordstream import SegmentationOutput, batch_values
@@ -51,10 +51,10 @@ __all__ = ["SegmentationKerasHooks"]
 class SegmentationKerasHooks(SegmentationBase):
     """The keras-typed segmentation hooks, shared by the Keras and TensorFlow concretes."""
 
-    def _default_keras_loss(self) -> Optional[Lazy[KerasLoss]]:
+    def _default_keras_loss(self) -> Optional[Partial[KerasLoss]]:
         return keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
-    def _default_keras_metrics(self) -> Optional[List[Lazy[KerasMetric]]]:
+    def _default_keras_metrics(self) -> Optional[List[Partial[KerasMetric]]]:
         if not self.num_classes:
             return None  # asked again once initialize() has resolved the count
         # `ignore_class` is Keras's `ignore_index`. `None` when nothing is excluded, because

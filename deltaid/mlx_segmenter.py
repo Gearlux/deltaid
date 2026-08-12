@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Seque
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
-from confluid import Lazy, Mandatory, configurable, flow
+from confluid import Mandatory, Partial, configurable, flow
 from loggair import get_logger
 from matrainer.metric_functions import accumulate_confusion, iou_per_class, mean_iou, overall_accuracy, zero_confusion
 from matrainer.metric_names import MetricNames
@@ -105,17 +105,17 @@ class MlxSegmenter(SegmentationBase, MlxLoopRunnable):
 
     def __init__(
         self,
-        model: Mandatory[Lazy[nn.Module]],
-        train_set: Optional[Lazy[RecordSource]] = None,
-        val_set: Optional[Lazy[RecordSource]] = None,
-        test_set: Optional[Lazy[RecordSource]] = None,
+        model: Mandatory[Partial[nn.Module]],
+        train_set: Optional[Partial[RecordSource]] = None,
+        val_set: Optional[Partial[RecordSource]] = None,
+        test_set: Optional[Partial[RecordSource]] = None,
         num_classes: Optional[int] = None,
         ignore_index: int = -100,
         task: SegmenterTask = "fit",
         max_epochs: int = 10,
         batch_size: int = 8,
-        trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
-        callbacks: Optional[List[Lazy[EpochCallback]]] = None,
+        trackers: Optional[Union[Partial[Tracker], Iterable[Partial[Tracker]]]] = None,
+        callbacks: Optional[List[Partial[EpochCallback]]] = None,
         experiment_name: str = "deltaid_segmentation",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -129,7 +129,7 @@ class MlxSegmenter(SegmentationBase, MlxLoopRunnable):
         test_metrics: Optional[Sequence[MlxMetric]] = None,
         class_names: Optional[List[str]] = None,
         plot_metrics: bool = False,
-        metric_names: Optional[Lazy[MetricNames]] = None,
+        metric_names: Optional[Partial[MetricNames]] = None,
     ) -> None:
         super().__init__(
             model=model,

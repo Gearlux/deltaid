@@ -73,7 +73,7 @@ class TestTheArchitectureSet:
 
 
 # --------------------------------------------------------------------------- #
-# Lazy init / zero-arg construction (the workspace mandate)
+# Partial init / zero-arg construction (the workspace mandate)
 # --------------------------------------------------------------------------- #
 class TestLazyConstruction:
     def test_zero_arg_construction_works_and_builds_nothing(self) -> None:
@@ -103,10 +103,10 @@ class TestLazyConstruction:
 
     def test_the_derived_num_classes_reaches_the_head(self) -> None:
         """What `!lazy:` wiring buys: the segmenter injects the resolved count at flow time."""
-        from confluid import LazyClass, flow
+        from confluid import PartialClass, flow
 
         model = flow(
-            LazyClass(SegmentationModelPytorch, encoder_name="resnet18", encoder_weights=None),
+            PartialClass(SegmentationModelPytorch, encoder_name="resnet18", encoder_weights=None),
             num_classes=5,
         )
         assert model.num_classes == 5

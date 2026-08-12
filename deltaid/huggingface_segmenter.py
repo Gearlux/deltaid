@@ -36,7 +36,7 @@ from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Seque
 import numpy as np
 import torch
 import torch.nn.functional as F
-from confluid import Lazy, Mandatory, configurable, flow
+from confluid import Mandatory, Partial, configurable, flow
 from loggair import get_logger
 from matrainer.huggingface.trainer import HuggingFaceRunnable
 from matrainer.metric_functions import accumulate_confusion, iou_per_class, mean_iou, overall_accuracy, zero_confusion
@@ -99,9 +99,9 @@ class HuggingFaceSegmenter(SegmentationBase, HuggingFaceRunnable):
 
     def __init__(
         self,
-        model: Mandatory[Lazy[HuggingFaceNetwork]],
-        train_set: Optional[Lazy[RecordSource]] = None,
-        test_set: Optional[Lazy[RecordSource]] = None,
+        model: Mandatory[Partial[HuggingFaceNetwork]],
+        train_set: Optional[Partial[RecordSource]] = None,
+        test_set: Optional[Partial[RecordSource]] = None,
         num_classes: Optional[int] = None,
         ignore_index: int = -100,
         task: SegmenterTask = "fit",
@@ -112,8 +112,8 @@ class HuggingFaceSegmenter(SegmentationBase, HuggingFaceRunnable):
         weight_decay: float = 0.01,
         report_to: str = "none",
         output_dir: Optional[str] = None,
-        trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
-        callbacks: Optional[List[Lazy[Any]]] = None,
+        trackers: Optional[Union[Partial[Tracker], Iterable[Partial[Tracker]]]] = None,
+        callbacks: Optional[List[Partial[Any]]] = None,
         experiment_name: str = "deltaid_segmentation",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -121,7 +121,7 @@ class HuggingFaceSegmenter(SegmentationBase, HuggingFaceRunnable):
         metrics: Optional[List[HuggingFaceMetric]] = None,
         val_metrics: Optional[List[HuggingFaceMetric]] = None,
         test_metrics: Optional[List[HuggingFaceMetric]] = None,
-        metric_names: Optional[Lazy[MetricNames]] = None,
+        metric_names: Optional[Partial[MetricNames]] = None,
     ) -> None:
         super().__init__(
             model=model,

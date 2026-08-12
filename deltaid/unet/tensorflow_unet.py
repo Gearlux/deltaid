@@ -192,7 +192,7 @@ class TensorFlowUNet(tf.Module):
     ) -> None:
         # `tf.Module.__init__` first — it sets up the name scope the variables register in.
         super().__init__(name="deltaid_tensorflow_unet")
-        # Lazy: store only. No variables allocated until `solidify()`.
+        # Partial: store only. No variables allocated until `solidify()`.
         self.num_classes = num_classes
         self.input_shape = tuple(input_shape)
         self.widths = tuple(widths)

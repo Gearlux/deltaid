@@ -23,7 +23,7 @@ from typing import Any, Dict, List
 import numpy as np
 import pytest
 import torch
-from confluid import lazy_param_names, to_pydantic
+from confluid import partial_param_names, to_pydantic
 from recordstream import Mask
 
 from deltaid.huggingface_segmenter import _METRICS, HuggingFaceSegmenter, _upsample_logits
@@ -250,7 +250,7 @@ class TestTheSharedContract:
     def test_the_deferred_slots_are_declared_lazy(self) -> None:
         """`Trainer` and `TrainingArguments` are DEFERRED slots, so a config can replace either
         without this class growing a knob per `TrainingArguments` field."""
-        assert {"model", "train_set", "trainer", "training_arguments"} <= lazy_param_names(HuggingFaceSegmenter)
+        assert {"model", "train_set", "trainer", "training_arguments"} <= partial_param_names(HuggingFaceSegmenter)
 
     def test_no_local_hyperparameter_derivation_survives(self) -> None:
         source = Path(inspect.getfile(HuggingFaceSegmenter)).read_text()
@@ -264,15 +264,15 @@ class TestTheSharedContract:
         """A config reaching for one of `TrainingArguments`' ~100 fields must not lose the rest.
 
         The slot is a whole-value override (that is what a YAML key does), so the derived knobs
-        live in `_training_arguments()` rather than pinned on the constructor's `LazyClass`.
+        live in `_training_arguments()` rather than pinned on the constructor's `PartialClass`.
         Pinned there, `training_arguments: {use_cpu: true}` would silently drop
         `remove_unused_columns=False` — which surfaces as a `KeyError: 'image'` three frames
         inside Trainer's own collator, saying nothing about the override.
         """
-        from confluid import LazyClass
+        from confluid import PartialClass
 
         seg = _segmenter(max_epochs=7, batch_size=4)
-        seg.training_arguments = LazyClass("transformers.TrainingArguments", use_cpu=True)
+        seg.training_arguments = PartialClass("transformers.TrainingArguments", use_cpu=True)
         args = seg._training_arguments()
         assert args.use_cpu is True, "the override's own key must survive"
         assert args.remove_unused_columns is False, "the derived floor must survive the override"
@@ -281,10 +281,10 @@ class TestTheSharedContract:
     def test_a_key_the_config_pinned_WINS_over_the_derived_one(self) -> None:
         """The derivation is a FLOOR, not an override — otherwise the slot could not be used to
         change anything the segmenter also has an opinion about."""
-        from confluid import LazyClass
+        from confluid import PartialClass
 
         seg = _segmenter(max_epochs=7)
-        seg.training_arguments = LazyClass("transformers.TrainingArguments", num_train_epochs=2)
+        seg.training_arguments = PartialClass("transformers.TrainingArguments", num_train_epochs=2)
         assert seg._training_arguments().num_train_epochs == 2
 
     def test_a_function_driven_backend_finishes_its_own_manifest(self) -> None:

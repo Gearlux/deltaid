@@ -18,7 +18,7 @@ from typing import Any, Dict, List
 
 import numpy as np
 import pytest
-from confluid import LazyClass, lazy_param_names, to_pydantic
+from confluid import PartialClass, partial_param_names, to_pydantic
 from recordstream import Mask, collate_records
 
 from deltaid.jax_segmenter import _METRICS, JaxSegmenter
@@ -46,7 +46,7 @@ def _records(n: int = 4, classes: int = NUM_CLASSES, learnable: bool = False) ->
 
 def _segmenter(**kwargs: Any) -> JaxSegmenter:
     params: Dict[str, Any] = {
-        "model": LazyClass(FlaxUNet),
+        "model": PartialClass(FlaxUNet),
         "num_classes": NUM_CLASSES,
         "max_epochs": 1,
         "batch_size": 2,
@@ -216,8 +216,8 @@ class TestTheMetrics:
 # --------------------------------------------------------------------------- #
 class TestTheSharedContract:
     def test_num_classes_resolution_agrees(self) -> None:
-        assert _resolved(_segmenter(model=LazyClass(FlaxUNet, num_classes=4), num_classes=None)) == 4
-        assert _resolved(_segmenter(model=LazyClass(FlaxUNet), num_classes=None, train_set=_records())) == 3
+        assert _resolved(_segmenter(model=PartialClass(FlaxUNet, num_classes=4), num_classes=None)) == 4
+        assert _resolved(_segmenter(model=PartialClass(FlaxUNet), num_classes=None, train_set=_records())) == 3
 
     def test_it_uses_the_shared_combination_rule(self) -> None:
         assert "from matrainer.metric_slots import" in Path(inspect.getfile(JaxSegmenter)).read_text()
@@ -257,10 +257,10 @@ class TestTheSharedContract:
         assert {"trackers", "metrics", "val_metrics", "test_metrics"} <= set(fields)
 
     def test_the_deferred_slots_are_declared_lazy(self) -> None:
-        """`callbacks` is deliberately NOT here: `Optional[List[Lazy[EpochCallback]]]` declares a
+        """`callbacks` is deliberately NOT here: `Optional[List[Partial[EpochCallback]]]` declares a
         LIST of deferred entries, which is what gates confluid's list broadcast — the slot itself
         is not the deferred thing, each entry is."""
-        assert {"model", "train_set", "val_set", "test_set", "trackers"} <= lazy_param_names(JaxSegmenter)
+        assert {"model", "train_set", "val_set", "test_set", "trackers"} <= partial_param_names(JaxSegmenter)
 
     def test_a_function_driven_backend_finishes_its_own_manifest(self) -> None:
         source = inspect.getsource(JaxSegmenter.fit)

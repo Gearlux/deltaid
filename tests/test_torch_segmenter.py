@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 import torch
 import torch.nn as nn
-from confluid import LazyClass, lazy_param_names, to_pydantic
+from confluid import PartialClass, partial_param_names, to_pydantic
 from recordstream import Mask
 
 from deltaid.torch_segmenter import TorchSegmenter
@@ -99,7 +99,7 @@ class TestItNeedsNoTrainingFramework:
 
     def test_it_writes_a_plain_state_dict(self, tmp_path: Path) -> None:
         """There is no framework checkpoint format, because there is no framework."""
-        seg = _segmenter(train_set=_records(4), checkpoint_dir=str(tmp_path), model=LazyClass(_TinyNet))
+        seg = _segmenter(train_set=_records(4), checkpoint_dir=str(tmp_path), model=PartialClass(_TinyNet))
         seg.run()
         saved = torch.load(tmp_path / "model.pt", weights_only=True)
         assert "head.weight" in saved
@@ -119,8 +119,8 @@ class TestParityWithTheLightningBackend:
         """Model head wins; explicit next; the mask walk last."""
         assert _resolved(_segmenter(model=_TinyNet(num_classes=5), num_classes=9)) == 5
         assert _resolved(_segmenter(model=nn.Identity(), num_classes=7)) == 7
-        assert _resolved(_segmenter(model=LazyClass(_TinyNet, num_classes=4), num_classes=None)) == 4
-        assert _resolved(_segmenter(model=LazyClass(_TinyNet), num_classes=None, train_set=_records())) == 3
+        assert _resolved(_segmenter(model=PartialClass(_TinyNet, num_classes=4), num_classes=None)) == 4
+        assert _resolved(_segmenter(model=PartialClass(_TinyNet), num_classes=None, train_set=_records())) == 3
 
     def test_the_loss_default_matches(self) -> None:
         seg = _segmenter(ignore_index=250)
@@ -143,7 +143,7 @@ class TestParityWithTheLightningBackend:
     def test_a_split_slot_adds_to_the_shared_set_for_that_split_only(self) -> None:
         from torchmetrics.classification import MulticlassAccuracy
 
-        seg = _segmenter(val_metrics={"accuracy": LazyClass(MulticlassAccuracy)})
+        seg = _segmenter(val_metrics={"accuracy": PartialClass(MulticlassAccuracy)})
         seg.initialize()
         assert set(seg.val_metrics.keys()) == {"val/mean_iou", "val/dice_macro", "val/accuracy"}
         assert set(seg.train_metrics.keys()) == {"train/mean_iou", "train/dice_macro"}
@@ -196,7 +196,7 @@ class TestTheSharedContract:
         assert {"metrics", "train_metrics", "val_metrics", "test_metrics"} <= set(fields)
 
     def test_the_deferred_slots_are_declared_lazy(self) -> None:
-        assert {"model", "train_set", "optimizer", "train_loader"} <= lazy_param_names(TorchSegmenter)
+        assert {"model", "train_set", "optimizer", "train_loader"} <= partial_param_names(TorchSegmenter)
 
     def test_no_local_hyperparameter_derivation_survives(self) -> None:
         """matrainer owns the ONE derivation, so two backends cannot answer differently."""
@@ -219,7 +219,7 @@ class TestTheSharedContract:
 # --------------------------------------------------------------------------- #
 class TestTheLoop:
     def test_fit_trains_and_reports_both_splits(self) -> None:
-        seg = _segmenter(train_set=_records(8), model=LazyClass(_TinyNet))
+        seg = _segmenter(train_set=_records(8), model=PartialClass(_TinyNet))
         seg.val_set = _records(4)
         seg.run()
         assert {"train/loss", "train/mean_iou", "val/loss", "val/mean_iou"} <= set(seg.computed_metrics)
@@ -230,7 +230,7 @@ class TestTheLoop:
         Learnable data on purpose: over random masks the loss would sit at ln(C) however well the
         optimizer was wired, so the test would measure nothing.
         """
-        seg = _segmenter(train_set=_records(8, learnable=True), model=LazyClass(_TinyNet), max_epochs=12)
+        seg = _segmenter(train_set=_records(8, learnable=True), model=PartialClass(_TinyNet), max_epochs=12)
         seg.run()
         losses = seg.history["train/loss"]
         assert len(losses) == 12
@@ -238,7 +238,7 @@ class TestTheLoop:
 
     def test_the_history_output_is_per_epoch(self) -> None:
         """What a Trainer's logger would have accumulated — this loop has to keep it itself."""
-        seg = _segmenter(train_set=_records(4), model=LazyClass(_TinyNet), max_epochs=3)
+        seg = _segmenter(train_set=_records(4), model=PartialClass(_TinyNet), max_epochs=3)
         seg.run()
         assert len(seg.history["train/loss"]) == 3
 
@@ -250,7 +250,7 @@ class TestTheLoop:
             seen.append(max_norm)
             return original(params, max_norm, *args, **kwargs)
 
-        seg = _segmenter(train_set=_records(4), model=LazyClass(_TinyNet), grad_clip=0.5)
+        seg = _segmenter(train_set=_records(4), model=PartialClass(_TinyNet), grad_clip=0.5)
         torch.nn.utils.clip_grad_norm_ = _spy  # type: ignore[assignment]
         try:
             seg.run()
@@ -297,6 +297,6 @@ class TestTheLoop:
         assert closed == [True]
 
     def test_the_outputs_raise_before_a_run(self) -> None:
-        seg = _segmenter(model=LazyClass(_TinyNet))
+        seg = _segmenter(model=PartialClass(_TinyNet))
         with pytest.raises(RuntimeError, match="only available after run"):
             _ = seg.computed_metrics
