@@ -139,9 +139,9 @@ class TestTorchUNet:
 
     def test_the_derived_num_classes_reaches_the_head(self) -> None:
         """What `!lazy:` wiring buys: the segmenter injects the resolved count at flow time."""
-        from confluid import LazyClass, flow
+        from confluid import PartialClass, flow
 
-        model = flow(LazyClass(TorchUNet), num_classes=5)
+        model = flow(PartialClass(TorchUNet), num_classes=5)
         assert model(torch.zeros(1, 3, 32, 32)).shape[1] == 5
 
 

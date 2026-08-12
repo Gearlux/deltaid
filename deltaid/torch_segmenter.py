@@ -24,7 +24,7 @@ Run it with ``deltaid train cfg.yaml --framework torch``.
 from typing import Iterable, List, Optional, Union
 
 import torch.nn as nn
-from confluid import Lazy, Mandatory, configurable
+from confluid import Mandatory, Partial, configurable
 from loggair import get_logger
 from matrainer.metric_names import MetricNames
 from matrainer.torch import Device, TorchLoopRunnable
@@ -89,9 +89,9 @@ class TorchSegmenter(SegmentationTorchHooks, TorchLoopRunnable):
 
     def __init__(
         self,
-        model: Mandatory[Lazy[nn.Module]],
-        train_set: Optional[Lazy[RecordSource]] = None,
-        test_set: Optional[Lazy[RecordSource]] = None,
+        model: Mandatory[Partial[nn.Module]],
+        train_set: Optional[Partial[RecordSource]] = None,
+        test_set: Optional[Partial[RecordSource]] = None,
         num_classes: Optional[int] = None,
         ignore_index: int = -100,
         task: SegmenterTask = "fit",
@@ -109,10 +109,10 @@ class TorchSegmenter(SegmentationTorchHooks, TorchLoopRunnable):
         device: Device = "auto",
         checkpoint_dir: Optional[str] = None,
         grad_clip: Optional[float] = None,
-        trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
+        trackers: Optional[Union[Partial[Tracker], Iterable[Partial[Tracker]]]] = None,
         class_names: Optional[List[str]] = None,
         plot_metrics: bool = False,
-        metric_names: Optional[Lazy[MetricNames]] = None,
+        metric_names: Optional[Partial[MetricNames]] = None,
     ) -> None:
         super().__init__(
             model=model,

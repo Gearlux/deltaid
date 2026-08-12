@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Seque
 
 import jax.numpy as jnp
 import numpy as np
-from confluid import Lazy, Mandatory, configurable, flow
+from confluid import Mandatory, Partial, configurable, flow
 from flax import nnx
 from loggair import get_logger
 from matrainer.jax.loop import EpochCallback, JaxLoopRunnable, JaxLoss, JaxMetric, JaxOptimizer, as_optax_loss
@@ -120,17 +120,17 @@ class JaxSegmenter(SegmentationBase, JaxLoopRunnable):
 
     def __init__(
         self,
-        model: Mandatory[Lazy[nnx.Module]],
-        train_set: Optional[Lazy[RecordSource]] = None,
-        val_set: Optional[Lazy[RecordSource]] = None,
-        test_set: Optional[Lazy[RecordSource]] = None,
+        model: Mandatory[Partial[nnx.Module]],
+        train_set: Optional[Partial[RecordSource]] = None,
+        val_set: Optional[Partial[RecordSource]] = None,
+        test_set: Optional[Partial[RecordSource]] = None,
         num_classes: Optional[int] = None,
         ignore_index: int = -100,
         task: SegmenterTask = "fit",
         max_epochs: int = 10,
         batch_size: int = 8,
-        trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
-        callbacks: Optional[List[Lazy[EpochCallback]]] = None,
+        trackers: Optional[Union[Partial[Tracker], Iterable[Partial[Tracker]]]] = None,
+        callbacks: Optional[List[Partial[EpochCallback]]] = None,
         experiment_name: str = "deltaid_segmentation",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -144,7 +144,7 @@ class JaxSegmenter(SegmentationBase, JaxLoopRunnable):
         test_metrics: Optional[Sequence[JaxMetric]] = None,
         class_names: Optional[List[str]] = None,
         plot_metrics: bool = False,
-        metric_names: Optional[Lazy[MetricNames]] = None,
+        metric_names: Optional[Partial[MetricNames]] = None,
         jit: bool = True,
     ) -> None:
         super().__init__(

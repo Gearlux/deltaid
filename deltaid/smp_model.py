@@ -90,7 +90,7 @@ class SegmentationModelPytorch(nn.Module):
     ``forward(images) -> logits`` only — a segmentation model computes its loss outside the
     model, so the segmenter's standard ``loss_fn(preds, target)`` call works with no batch wrapper.
 
-    **Lazy construction (Lazy-Init / Zero-Arg mandate).** ``__init__`` does NO functional work — it
+    **Partial construction (Partial-Init / Zero-Arg mandate).** ``__init__`` does NO functional work — it
     only stores config. The smp model (and any pretrained-weight download) is built on first use by
     :meth:`solidify` — called by :meth:`forward`, by confluid's auto-build on ``flow()``, or
     explicitly — and cached in ``self.segmenter``, so ``SegmentationModelPytorch()`` is cheap and
@@ -115,7 +115,7 @@ class SegmentationModelPytorch(nn.Module):
     Attributes:
         checkpoint_strict: Whether ``load_state_dict`` enforces exact key matching. Defaults to
             ``False`` so a re-headed ``num_classes`` does not reject the whole load.
-        segmenter: Lazy cache for the built smp model (``None`` until :meth:`solidify`). A PUBLIC
+        segmenter: Partial cache for the built smp model (``None`` until :meth:`solidify`). A PUBLIC
             submodule name, so a state_dict saved through Lightning — which prefixes ``model.``,
             stripped by ``load_lightning_checkpoint`` — round-trips as ``segmenter.*`` keys that
             match this wrapper's layout. Naming it ``self.model`` would make the strip chew through
@@ -137,7 +137,7 @@ class SegmentationModelPytorch(nn.Module):
         # Store config ONLY — no create_model, no weight download, no checkpoint load. The model
         # is built lazily on first use (via `solidify()`, the cached `backbone` property, or
         # `forward()` — all three share the one cache), so this constructor is cheap and zero-arg
-        # construction works (Lazy-Init / Zero-Arg mandate).
+        # construction works (Partial-Init / Zero-Arg mandate).
         self.arch: SegmentationArchitecture = arch
         self.encoder_name = encoder_name
         self.encoder_weights = encoder_weights

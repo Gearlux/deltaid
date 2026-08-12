@@ -193,8 +193,8 @@ def test_every_backend_takes_the_metric_naming_knob(stem: str) -> None:
     annotations = {a.arg: ast.unparse(a.annotation) for a in init.args.args if a.annotation is not None}
 
     assert "metric_names" in annotations, f"{stem} cannot be told how to name what it records"
-    assert "Lazy[MetricNames]" in annotations["metric_names"], (
-        f"{stem}: the slot must be `Optional[Lazy[MetricNames]]` — wired from YAML it arrives as "
+    assert "Partial[MetricNames]" in annotations["metric_names"], (
+        f"{stem}: the slot must be `Optional[Partial[MetricNames]]` — wired from YAML it arrives as "
         f"a deferred marker (got {annotations['metric_names']})"
     )
 

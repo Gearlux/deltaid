@@ -65,7 +65,7 @@ class KerasUNet(keras.Model):
         bottleneck_width: int = BOTTLENECK_WIDTH,
         seed: int = 0,
     ) -> None:
-        # Lazy: store only, and `super().__init__()` FIRST — a `keras.Layer` refuses attribute
+        # Partial: store only, and `super().__init__()` FIRST — a `keras.Layer` refuses attribute
         # assignment before it.
         super().__init__()
         self.num_classes = num_classes

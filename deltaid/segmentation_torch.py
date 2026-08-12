@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Mapping, Optional, Union
 
 import torch
 import torch.nn as nn
-from confluid import LazyClass
+from confluid import PartialClass
 from loggair import get_logger
 from matrainer.torch.metrics import MetricsSpec
 from matrainer.torch.runnable import TorchTrainerRunnable
@@ -64,8 +64,8 @@ class SegmentationTorchHooks(SegmentationBase, TorchTrainerRunnable):
             # `mean_iou`, not `miou`: the JAX / MLX / HuggingFace backends name their metrics
             # from their own function registry and cannot say `miou`, so a different word here
             # would put one quantity in two columns of the same cross-backend comparison.
-            "mean_iou": LazyClass[Metric](MulticlassJaccardIndex, average="macro", ignore_index=self.ignore_index),
-            "dice_macro": LazyClass[Metric](
+            "mean_iou": PartialClass[Metric](MulticlassJaccardIndex, average="macro", ignore_index=self.ignore_index),
+            "dice_macro": PartialClass[Metric](
                 MulticlassF1Score, average="macro", ignore_index=self.ignore_index, multidim_average="global"
             ),
         }
