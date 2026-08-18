@@ -69,11 +69,11 @@ TRACKERS = {
 NON_TORCH = ("keras", "tensorflow", "fastai", "jax", "mlx", "huggingface")
 
 
-def resolve(framework: str, variant: str = "zoo", tracker: str = "mlflow") -> Dict[str, Any]:
+def load(framework: str, variant: str = "zoo", tracker: str = "mlflow", until="settled") -> Dict[str, Any]:
     scopes = [f"framework={framework}", f"tracker={tracker}"]
     if variant == "unet":
         scopes.append("model=unet")
-    document = confluid.load(confluid.load_config(SWEEP), flow=False, scopes=scopes)
+    document = confluid.load(SWEEP, until="document", scopes=scopes)
     assert isinstance(document, dict)
     return document
 
@@ -120,7 +120,7 @@ def test_every_cell_resolves_to_its_own_runnable_and_model(cell: Tuple[str, str]
     """The regression pin for the replace-not-merge trap described in the module docstring."""
     framework, variant = cell
     expected_runnable, expected_model = MATRIX[cell]
-    document = resolve(framework, variant)
+    document = load(framework, variant, until="settled")
 
     assert target_name(document["runnable"]) == expected_runnable
     assert target_name(document.get("model")) == expected_model
@@ -143,7 +143,7 @@ def test_the_torch_backed_backends_share_one_implementation_of_the_spec() -> Non
     If one of them ever resolves to something else, a per-backend block has been added where the
     shared one was doing the job, which is the duplication `unet/spec.py` exists to avoid.
     """
-    names = {target_name(resolve(fw, "unet")["model"]) for fw in ("lightning", "torch", "fastai")}
+    names = {target_name(load(fw, "unet", until="settled")["model"]) for fw in ("lightning", "torch", "fastai")}
     assert names == {"TorchUNet"}
 
 
@@ -156,7 +156,9 @@ def test_each_non_torch_engine_gets_its_own_implementation_of_the_spec() -> None
     ORDER, which is exactly the kind of thing an edit can reverse silently, so it is pinned here:
     without it, `--framework mlx --model unet` would train a torch model under the MLX name.
     """
-    assert {fw: target_name(resolve(fw, "unet")["model"]) for fw in ("keras", "tensorflow", "jax", "mlx")} == {
+    assert {
+        fw: target_name(load(fw, "unet", until="settled")["model"]) for fw in ("keras", "tensorflow", "jax", "mlx")
+    } == {
         "keras": "KerasUNet",
         "tensorflow": "TensorFlowUNet",
         "jax": "FlaxUNet",
@@ -166,7 +168,7 @@ def test_each_non_torch_engine_gets_its_own_implementation_of_the_spec() -> None
 
 @pytest.mark.parametrize("tracker", sorted(TRACKERS))
 def test_each_tracker_scope_selects_exactly_that_backend(tracker: str) -> None:
-    trackers = resolve("lightning", tracker=tracker)["trackers"]
+    trackers = load("lightning", tracker=tracker, until="settled")["trackers"]
 
     assert [target_name(t) for t in trackers] == [TRACKERS[tracker]]
 
@@ -178,7 +180,7 @@ def test_the_tracker_takes_its_names_from_the_run(tracker: str) -> None:
     A literal here would drift from whatever the run is actually called — the one thing a sweep
     must not do, since the tracker is where the runs are compared.
     """
-    wired = resolve("lightning", tracker=tracker)["trackers"][0]
+    wired = load("lightning", tracker=tracker, until="settled")["trackers"][0]
 
     for key in ("experiment_name", "run_name"):
         assert type(wired.kwargs[key]).__name__ == "Reference", f"{tracker}: {key} is not a !ref:"
@@ -196,7 +198,7 @@ def test_a_metric_set_never_reaches_an_engine_that_cannot_consume_it() -> None:
     Read with `ast` rather than by importing: a machine need not carry all eight frameworks, and an
     import-based check would silently pass on the one that does not have the backend it would test.
     """
-    document = resolve("lightning")
+    document = load("lightning", until="settled")
     assert isinstance(document["metrics"], dict), "the shared set must be a torchmetrics template MAPPING"
     assert set(document["metrics"]) == {"mean_iou", "pixel_accuracy"}
 
@@ -216,15 +218,15 @@ def test_every_row_reports_mean_iou() -> None:
     `fastai.metrics` publishes the quantity as `JaccardCoeffMulti`, whose recorder column is
     `jaccard_coeff_multi` — so the overlay's `metric_names.renames` carries it into the same column.
     """
-    assert set(resolve("lightning")["metrics"]) >= {"mean_iou"}
+    assert set(load("lightning", until="settled")["metrics"]) >= {"mean_iou"}
 
     # keras / tensorflow / jax / mlx / huggingface all DEFAULT to mean IoU, so an unset slot is the
     # right answer for them; huggingface names it anyway because it also pins its output directory.
-    assert "mean_iou" in resolve("huggingface")["runnable"].kwargs["metrics"]
+    assert "mean_iou" in load("huggingface", until="settled")["runnable"].kwargs["metrics"]
 
-    fastai_metrics = resolve("fastai")["runnable"].kwargs["metrics"]
+    fastai_metrics = load("fastai", until="settled")["runnable"].kwargs["metrics"]
     assert "JaccardCoeffMulti" in fastai_metrics, "fastai's mean IoU must be a NAME it can resolve"
-    renames = resolve("fastai")["metric_names"].kwargs["renames"]
+    renames = load("fastai", until="settled")["metric_names"].kwargs["renames"]
     assert renames["jaccard_coeff_multi"] == "mean_iou", "fastai's column must land under the shared name"
 
 
@@ -236,7 +238,7 @@ def test_the_naming_knob_reaches_every_backend() -> None:
     `renames` are per-CONFIG.
     """
     for framework in ("lightning", *NON_TORCH):
-        wired = resolve(framework).get("metric_names")
+        wired = load(framework, until="settled").get("metric_names")
         assert target_name(wired) == "MetricNames", f"{framework} does not receive the naming knob"
 
 
@@ -249,9 +251,9 @@ def test_every_row_reports_pixel_accuracy_too() -> None:
     Everyone else reports it from the shared torchmetrics template (lightning / torch) or from its
     own engine defaults (keras / tensorflow / jax / mlx / huggingface).
     """
-    assert "pixel_accuracy" in resolve("lightning")["metrics"]
-    assert "pixel_accuracy" in resolve("huggingface")["runnable"].kwargs["metrics"]
-    assert "pixel_accuracy" in resolve("fastai")["runnable"].kwargs["metrics"]
+    assert "pixel_accuracy" in load("lightning", until="settled")["metrics"]
+    assert "pixel_accuracy" in load("huggingface", until="settled")["runnable"].kwargs["metrics"]
+    assert "pixel_accuracy" in load("fastai", until="settled")["runnable"].kwargs["metrics"]
 
 
 def test_the_sweep_writes_everything_under_one_tree() -> None:
@@ -261,5 +263,5 @@ def test_the_sweep_writes_everything_under_one_tree() -> None:
     `AGENTS.md`, "Run Output Lands In A Gitignored `runs/`"). `sweep_logs/` keeps only the
     driver's per-cell `.log` files; everything a RUN produces belongs here.
     """
-    assert resolve("tensorflow", "unet")["runnable"].kwargs["export_dir"].startswith("./runs/")
-    assert resolve("huggingface")["runnable"].kwargs["output_dir"].startswith("./runs/")
+    assert load("tensorflow", "unet", until="settled")["runnable"].kwargs["export_dir"].startswith("./runs/")
+    assert load("huggingface", until="settled")["runnable"].kwargs["output_dir"].startswith("./runs/")
