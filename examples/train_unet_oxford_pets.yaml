@@ -10,11 +10,11 @@
 # dataset, the preprocessing, the batch/epoch knobs, the run identity. Only the
 # keys below it change when the training engine does.
 #
-# The top level is also the DEFAULT backend (lightning), so this config runs
-# as-is with no scope at all. An alternative backend is a
-# `!scope:framework=<name>` block that OVERRIDES only the framework-specific
-# keys (document order, last write wins). `--framework <name>` activates it,
-# and it is the SAME flag on either runner:
+# Every backend is a `!scope:framework=<name>` block that OVERRIDES only the
+# framework-specific keys (document order, last write wins), and
+# `default_scopes:` names the one a bare run uses (lightning), so this config
+# runs as-is with no scope at all. `--framework <name>` picks another, and it is
+# the SAME flag on either runner:
 #
 #   deltaid train    examples/train_unet_oxford_pets.yaml --framework lightning
 #   recordstream run examples/train_unet_oxford_pets.yaml --framework lightning
@@ -35,6 +35,11 @@
 # ===========================================================================
 # Shared — identical for every backend
 # ===========================================================================
+
+# The backend a bare `deltaid train` / `recordstream run` uses. A `--framework <name>`
+# wins over it; the value must name a block below (a typo is the same error a
+# typo'd flag gets); it is a static list — never a `${...}` value.
+default_scopes: [framework=lightning]
 
 experiment_name: oxford_pets_segmentation
 run_name: unet_resnet34_pets
@@ -138,21 +143,20 @@ max_epochs: 5
 # ===========================================================================
 # Framework-specific — the ONLY part a backend swap touches
 # ===========================================================================
-# Top level = the default backend (lightning).
+# The `runnable:` lives in each framework block below; the keys HERE are the
+# torch-family defaults every block inherits unless it overrides them.
 #
-# EVERY framework-specific key sits at THIS level — `runnable`, `model`,
-# `metrics` — and an alternative backend overrides the ones it must. That
+# EVERY framework-specific key sits at THIS level — `model`, `metrics`,
+# `preprocess` — and a backend block overrides the ones it must. That
 # flatness is not cosmetic: a scope block replaces a KEY and takes its whole
 # subtree with it, so a `model:` nested INSIDE `runnable:` would vanish the
 # moment a block swapped the runnable. Keep every slot a sibling of the others
 # and a block can override one without erasing another.
 #
-# No `task:` here on purpose. The segmenter's constructor already defaults to
+# No `task:` anywhere on purpose. The segmenter's constructor already defaults to
 # `fit`, and every `deltaid <verb>` sets the task from the verb (train->fit,
 # evaluate->test, predict->predict), so a `task: fit` line would be dead in both
 # paths. Set `task:` only to change what a BARE `recordstream run` does.
-
-runnable: !class:deltaid.LightningSegmenter
 
 # `smp.create_model` behind one wrapper, so `arch:` is the whole difference
 # between U-Net, DeepLabV3+, FPN, PSPNet, SegFormer and seven more — the encoder
@@ -192,12 +196,10 @@ unet: !scope:model=unet
     # joint resize above; it must stay divisible by 2 ** len(widths) = 8.
     input_shape: [224, 224, 3]
 
-# The default backend gets a block of its own even though the top level already
-# IS lightning: confluid raises when a scope activation matches no block, so an
-# undeclared default would make `--framework lightning` an error. That raise is
-# the check a backend SUBCOMMAND could never do — a typo'd `--framework lightnin`
-# now lists the backends this file declares instead of silently training the
-# default one.
+# The default — `default_scopes:` at the top of the file names it, so a bare
+# `deltaid train` runs this block and `--framework lightning` names the same one.
+# A typo'd `--framework lightnin` is an error listing the backends this file
+# declares — the check a backend SUBCOMMAND could never do.
 lightning: !scope:framework=lightning
   runnable: !class:deltaid.LightningSegmenter
 
