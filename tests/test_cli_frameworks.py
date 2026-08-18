@@ -134,7 +134,7 @@ def test_every_declared_framework_resolves_to_a_complete_runnable(framework: str
     a missing-argument TypeError minutes into a run. Keeping every framework-specific key a
     top-level SIBLING is what prevents it, and this asserts the result rather than the layout.
     """
-    doc = confluid.load(confluid.load_config(EXAMPLE), flow=False, scopes=[f"framework={framework}"])
+    doc = confluid.load(EXAMPLE, until="document", scopes=[f"framework={framework}"])
     for key in ("runnable", "model", "train_set", "val_set"):
         assert doc.get(key) is not None, f"--framework {framework} leaves {key!r} unset"
 
@@ -145,7 +145,7 @@ def test_the_default_backend_has_a_block_of_its_own() -> None:
     check a backend subcommand could never do: a typo now lists the declared backends instead of
     silently training the default one."""
     with pytest.raises(confluid.ScopeError) as excinfo:
-        confluid.load(confluid.load_config(EXAMPLE), flow=False, scopes=["framework=lightnin"])
+        confluid.load(EXAMPLE, until="document", scopes=["framework=lightnin"])
     assert "lightning" in str(excinfo.value), "the error must LIST the values the config declares"
 
 
