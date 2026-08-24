@@ -18,11 +18,14 @@ from typing import Any, Dict, List
 
 import numpy as np
 import pytest
-from confluid import PartialClass, partial_param_names, to_pydantic
-from recordstream import Mask, collate_records
 
-from deltaid.jax_segmenter import _METRICS, JaxSegmenter
-from deltaid.unet.flax_unet import FlaxUNet
+pytest.importorskip("jax", reason="the jax backend needs deltaid[jax]")
+
+from confluid import PartialClass, partial_param_names, to_pydantic  # noqa: E402
+from recordstream import Mask, collate_records  # noqa: E402
+
+from deltaid.jax_segmenter import _METRICS, JaxSegmenter  # noqa: E402
+from deltaid.unet.flax_unet import FlaxUNet  # noqa: E402
 
 NUM_CLASSES = 3
 SIDE = 16

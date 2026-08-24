@@ -99,12 +99,20 @@ def test_it_is_a_sibling_of_the_keras_backend_not_a_subclass() -> None:
     cls = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "TensorFlowSegmenter")
     bases = [ast.unparse(b) for b in cls.bases]
     assert "KerasSegmenter" not in bases
-    # The narrowed precondition (the engine guard) lives on the machinery base since P5.
+    assert "TensorFlowRunnable" in SOURCE.read_text()
+
+
+@requires_tensorflow
+def test_the_narrowed_precondition_lives_on_the_machinery_base() -> None:
+    """The other half of the sibling claim — the engine guard `KerasSegmenter` does not have.
+
+    Split from the source-only test above because reading the machinery's body needs the module
+    IMPORTED, and it imports TensorFlow at import time.
+    """
     import inspect
 
     from matrainer.tensorflow.loop import TensorFlowRunnable
 
-    assert "TensorFlowRunnable" in SOURCE.read_text()
     assert "_require_tensorflow_backend" in inspect.getsource(TensorFlowRunnable.run)
 
 

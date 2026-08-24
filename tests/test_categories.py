@@ -7,6 +7,7 @@ SILENTLY — the class still resolves from a dotted path in YAML, so nothing els
 why they are pinned here rather than left to be discovered by a user with a short menu.
 """
 
+import importlib.util
 from typing import Any, Tuple
 
 from confluid.registry import get_registry
@@ -18,7 +19,12 @@ from deltaid.huggingface_segmenter import HuggingFaceSegmenter
 from deltaid.keras_segmenter import KerasSegmenter
 from deltaid.lightning_segmenter import LightningSegmenter
 from deltaid.smp_model import SegmentationModelPytorch
-from deltaid.tensorflow_segmenter import TensorFlowSegmenter
+
+#: `deltaid.tensorflow_segmenter` imports tensorflow at import time, and `tensorflow` is a
+#: SELECTABLE extra this workspace may not have installed. The tags it carries are still worth
+#: pinning, so the two tests below reach for it only where the extra is present — every OTHER
+#: backend's tags stay checked on every machine, which is the coverage that matters here.
+_HAS_TENSORFLOW = importlib.util.find_spec("tensorflow") is not None
 
 
 def test_model_tags() -> None:
@@ -134,7 +140,11 @@ def test_the_keras_loss_is_a_plain_upstream_class_too() -> None:
 def test_every_segmenter_is_a_segmentation_trainer() -> None:
     """A dropped `role` silently empties navigaitor's `role="trainer"` scan — which is what
     builds `TASK_REGISTRY` and every generated task config."""
-    backends: Tuple[Any, ...] = (LightningSegmenter, KerasSegmenter, TensorFlowSegmenter, HuggingFaceSegmenter)
+    backends: Tuple[Any, ...] = (LightningSegmenter, KerasSegmenter, HuggingFaceSegmenter)
+    if _HAS_TENSORFLOW:
+        from deltaid.tensorflow_segmenter import TensorFlowSegmenter
+
+        backends += (TensorFlowSegmenter,)
     for cls in backends:
         assert cls.__confluid_task__ == "segmentation", cls.__name__
         assert cls.__confluid_role__ == "trainer", cls.__name__
@@ -145,8 +155,11 @@ def test_the_framework_tag_names_the_api_a_class_is_wired_to() -> None:
     names what its SLOTS admit, and every one of them holds a `keras.losses` / `keras.metrics` /
     `keras.Model`. Its TensorFlow-ness is the loop, which no picker wires."""
     assert KerasSegmenter.__confluid_framework__ == "keras"
-    assert TensorFlowSegmenter.__confluid_framework__ == "keras"
     assert HuggingFaceSegmenter.__confluid_framework__ == "huggingface"
+    if _HAS_TENSORFLOW:
+        from deltaid.tensorflow_segmenter import TensorFlowSegmenter
+
+        assert TensorFlowSegmenter.__confluid_framework__ == "keras"
 
 
 def test_the_hub_wrapper_is_a_segmentation_model() -> None:
