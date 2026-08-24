@@ -11,7 +11,9 @@ anywhere else in the fleet:
 * train/eval is module STATE, so the mode is set once per phase rather than passed per call;
 * arrays are LAZY, so ``mx.eval`` is what forces the work and omitting it does not raise.
 
-Apple silicon ONLY: `mlx` is importable nowhere else, so this whole file is.
+Apple silicon ONLY: `mlx` is importable nowhere else, so this whole file is SKIPPED where the
+`mlx` extra is absent — the module-level `importorskip` below is what enforces that, because the
+segmenter import at the bottom of this block pulls `mlx.core` in at collection time.
 """
 
 import inspect
@@ -21,11 +23,14 @@ from typing import Any, Dict, List
 
 import numpy as np
 import pytest
-from confluid import PartialClass, partial_param_names, to_pydantic
-from recordstream import Mask, collate_records
 
-from deltaid.mlx_segmenter import _METRICS, MlxSegmenter
-from deltaid.unet.mlx_unet import MlxUNet
+pytest.importorskip("mlx", reason="the mlx backend needs deltaid[mlx] (Apple silicon only)")
+
+from confluid import PartialClass, partial_param_names, to_pydantic  # noqa: E402
+from recordstream import Mask, collate_records  # noqa: E402
+
+from deltaid.mlx_segmenter import _METRICS, MlxSegmenter  # noqa: E402
+from deltaid.unet.mlx_unet import MlxUNet  # noqa: E402
 
 NUM_CLASSES = 3
 SIDE = 16

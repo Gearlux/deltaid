@@ -154,10 +154,16 @@ def test_the_default_backend_is_a_block_named_by_default_scopes() -> None:
     assert "lightning" in str(excinfo.value), "the error must LIST the values the config declares"
 
 
-def test_every_framework_names_registrations_that_import() -> None:
+def test_every_framework_names_registrations_that_import(monkeypatch: pytest.MonkeyPatch) -> None:
     """A `registrations` module that does not import leaves every bare loss name unresolvable."""
     import importlib
 
+    # Importing these has IMPORT-TIME side effects that outlive the test: the tensorflow
+    # framework's module `setdefault`s KERAS_BACKEND. Give monkeypatch a record of the
+    # variable (set-then-delete restores the ambient value, present or absent) so the
+    # binding does not leak into every later test's `import keras`.
+    monkeypatch.setenv("KERAS_BACKEND", "torch")
+    monkeypatch.delenv("KERAS_BACKEND")
     for name, spec in FRAMEWORKS.items():
         for module in registration_modules(spec):
             importlib.import_module(module)  # raises if the path is wrong
@@ -178,7 +184,13 @@ def test_the_tensorflow_backend_pins_the_keras_engine_before_anything_imports_ke
     `deltaid.keras_segmentation` (there is deliberately no second loss module) and binds the torch
     default before `deltaid._tensorflow` gets to set its own.
     """
-    monkeypatch.delenv("KERAS_BACKEND", raising=False)
+    # `delenv(raising=False)` records NOTHING when the variable is already absent, so the
+    # direct `os.environ[...] = ...` inside `pin_keras_backend` would have no undo entry and
+    # leak `KERAS_BACKEND=tensorflow` into every later test — where `import keras` then tries
+    # to load a TensorFlow this workspace may not have. Setting it first gives monkeypatch a
+    # record to restore from.
+    monkeypatch.setenv("KERAS_BACKEND", "torch")
+    monkeypatch.delenv("KERAS_BACKEND")
     pin_keras_backend(requested_framework(["deltaid", "train", "c.yaml", "--framework", "tensorflow"]))
 
     assert os.environ.get("KERAS_BACKEND") == "tensorflow"
@@ -195,7 +207,8 @@ def test_an_explicit_keras_backend_is_never_overridden(monkeypatch: pytest.Monke
 @pytest.mark.parametrize("framework", ["lightning", "torch", "keras", "fastai", "jax", "mlx", "huggingface", None])
 def test_no_other_framework_touches_keras_backend(monkeypatch: pytest.MonkeyPatch, framework: Any) -> None:
     """`keras` included: it runs on whichever engine is loaded, which is the whole point of it."""
-    monkeypatch.delenv("KERAS_BACKEND", raising=False)
+    monkeypatch.setenv("KERAS_BACKEND", "torch")  # see above: gives monkeypatch a record to undo
+    monkeypatch.delenv("KERAS_BACKEND")
     pin_keras_backend(framework)
 
     assert "KERAS_BACKEND" not in os.environ

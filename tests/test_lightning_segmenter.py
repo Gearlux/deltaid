@@ -638,3 +638,15 @@ class TestThePerClassReport:
         seg.val_metrics.update(torch.randn(2, NUM_CLASSES, SIDE, SIDE), _target_masks(2))
         seg._report_epoch_metrics(seg.val_metrics)
         assert tracker.texts == []
+
+
+def test_persistent_workers_can_be_named_instead_of_derived() -> None:
+    """The HOST-scoped knob: a config says `persistent_workers: false` and keeps its workers.
+
+    macOS terminates persistent workers slowly enough that a short run spends longer stopping
+    than training, which no derivation from `num_workers` can see."""
+    runnable = LightningSegmenter(model=_TinyNet(), num_classes=NUM_CLASSES, num_workers=2, persistent_workers=False)
+    for split in ("train_loader", "val_loader", "test_loader"):
+        marker = getattr(runnable, split)
+        assert marker.kwargs["persistent_workers"] is False, split
+        assert marker.kwargs["num_workers"] == 2, split

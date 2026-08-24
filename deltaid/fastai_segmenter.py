@@ -72,6 +72,10 @@ class FastaiSegmenter(SegmentationTorchHooks, FastaiRunnable):
         max_epochs: Training epochs.
         batch_size: Rows per batch.
         num_workers: DataLoader worker processes.
+        persistent_workers: Override the pairing derived from ``num_workers`` (``None`` derives
+            ``num_workers != 0``). An explicit value is for a HOST fact no derivation can see —
+            macOS terminates persistent workers slowly, so a config there sets ``false`` while
+            keeping its workers. ``True`` with ``num_workers=0`` is refused.
         learning_rate: Peak LR — ``lr_max`` for one-cycle, ``lr`` otherwise.
         weight_decay: fastai's ``wd``. ``None`` is fastai's own default.
         one_cycle: Use ``fit_one_cycle`` (fastai's headline scheduler) instead of plain ``fit``.
@@ -111,6 +115,7 @@ class FastaiSegmenter(SegmentationTorchHooks, FastaiRunnable):
         max_epochs: int = 10,
         batch_size: int = 8,
         num_workers: int = 0,
+        persistent_workers: Optional[bool] = None,
         learning_rate: float = 1e-3,
         weight_decay: Optional[float] = None,
         one_cycle: bool = True,
@@ -136,6 +141,7 @@ class FastaiSegmenter(SegmentationTorchHooks, FastaiRunnable):
             max_epochs=max_epochs,
             batch_size=batch_size,
             num_workers=num_workers,
+            persistent_workers=persistent_workers,
             trackers=trackers,
             experiment_name=experiment_name,
             run_name=run_name,

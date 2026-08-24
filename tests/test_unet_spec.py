@@ -7,6 +7,7 @@ framework arrives — and it is the only thing holding the implementations toget
 APIs cannot share the layer code.
 """
 
+import importlib.util
 from pathlib import Path
 from typing import Any, Tuple
 
@@ -23,6 +24,26 @@ from deltaid.unet.spec import (
     trainable_parameter_count,
 )
 from deltaid.unet.torch_unet import TorchUNet
+
+#: The engines this file compares are SELECTABLE extras — a workspace picks its frameworks, so a
+#: machine legitimately has torch + keras and none of the other three. Each implementation's own
+#: class skips on its own engine; the cross-framework comparisons need all five at once.
+requires_tensorflow = pytest.mark.skipif(
+    importlib.util.find_spec("tensorflow") is None,
+    reason="the TensorFlow implementation needs deltaid[tensorflow]",
+)
+requires_jax = pytest.mark.skipif(
+    importlib.util.find_spec("jax") is None,
+    reason="the Flax implementation needs deltaid[jax]",
+)
+requires_mlx = pytest.mark.skipif(
+    importlib.util.find_spec("mlx") is None,
+    reason="the MLX implementation needs deltaid[mlx] (Apple silicon only)",
+)
+requires_every_engine = pytest.mark.skipif(
+    any(importlib.util.find_spec(m) is None for m in ("tensorflow", "jax", "mlx")),
+    reason="the five-way comparison needs every engine: deltaid[tensorflow,jax,mlx]",
+)
 
 
 def _tiny(**kwargs: object) -> TorchUNet:
@@ -216,6 +237,7 @@ class TestKerasUNetMatchesTheSpec:
         assert not np.array_equal(a, other), "a different seed must not — else it is seeding nothing"
 
 
+@requires_tensorflow
 class TestTensorFlowUNetMatchesTheSpec:
     @pytest.mark.parametrize("num_classes", [2, 3, 10])
     def test_the_parameter_count_matches_the_derivation(self, num_classes: int) -> None:
@@ -250,6 +272,7 @@ class TestTensorFlowUNetMatchesTheSpec:
         assert tuple(out.shape) == (2, 64, 64, 3)
 
 
+@requires_jax
 class TestFlaxUNetMatchesTheSpec:
     @pytest.mark.parametrize("num_classes", [2, 3, 10])
     def test_the_parameter_count_matches_the_derivation(self, num_classes: int) -> None:
@@ -295,6 +318,7 @@ class TestFlaxUNetMatchesTheSpec:
             FlaxUNet(num_classes=3)(np.zeros((1, 60, 60, 3), dtype="float32"))
 
 
+@requires_mlx
 class TestMlxUNetMatchesTheSpec:
     @pytest.mark.parametrize("num_classes", [2, 3, 10])
     def test_the_parameter_count_matches_the_derivation(self, num_classes: int) -> None:
@@ -345,6 +369,7 @@ class TestMlxUNetMatchesTheSpec:
             MlxUNet(num_classes=3)(mx.array(np.zeros((1, 60, 60, 3), dtype="float32")))
 
 
+@requires_every_engine
 def test_all_five_implementations_agree_with_the_spec_and_each_other() -> None:
     """The claim the package exists to make, stated once.
 
@@ -366,6 +391,7 @@ def test_all_five_implementations_agree_with_the_spec_and_each_other() -> None:
     assert set(counts.values()) == {trainable_parameter_count(3)}, counts
 
 
+@requires_every_engine
 def test_every_implementation_is_an_instance_of_its_own_frameworks_model_type() -> None:
     """No loop reaches THROUGH a wrapper: `model.fit(...)` must work on the object a config
     wired, so each implementation IS what its engine calls a model."""
@@ -436,6 +462,7 @@ def test_no_tensorflow_module_reaches_back_into_keras_through_a_tf_alias() -> No
     )
 
 
+@requires_tensorflow
 def test_the_tensorflow_unet_builds_after_keras_has_claimed_the_torch_engine() -> None:
     """The regression itself, reproduced in ONE process — the only place it is visible.
 
