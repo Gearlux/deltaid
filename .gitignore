@@ -27,7 +27,7 @@ build/
 htmlcov/
 coverage-*
 coverage.xml
-test-report.xml
+*test-report.xml
 
 # Project-Specific (Data & Logs)
 lightning_logs/
