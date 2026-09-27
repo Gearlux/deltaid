@@ -76,7 +76,6 @@ preprocess:
     std: [0.229, 0.224, 0.225]
   - !class:recordstream.ops.torch.ToTensor        # HWC -> CHW, for the IMAGE only
     field: image
-    normalize: false
 ```
 
 `output: mask` is load-bearing rather than cosmetic: it is the key albumentations itself uses, so
@@ -84,8 +83,8 @@ recordstream's op-family dispatch hands the transform **both** `image` and `mask
 single draw moves them together. An image-only transform like `Normalize` still touches the image
 alone.
 
-`normalize: false` on `ToTensor` because `Normalize` has already standardized the pixels — leaving
-the default `true` divides them by 255 again and squashes them to ~`[-0.01, 0.01]`.
+`ToTensor` only converts HWC to CHW; the pixels it receives are already float32, standardized by
+`Normalize`.
 
 ## Models — a zoo wrapper, and a shared spec
 

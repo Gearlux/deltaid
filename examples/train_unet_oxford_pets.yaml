@@ -98,13 +98,10 @@ preprocess:
     mean: [0.485, 0.456, 0.406]
     std: [0.229, 0.224, 0.225]
 
-  # 6. HWC -> CHW float32, for the IMAGE only (`field: image`) — the mask must
-  #    stay a plain [H, W] int map. `normalize: false` because step 5 has ALREADY
-  #    standardized the pixels; the default `true` would divide the standardized
-  #    values by 255 again and squash them to ~[-0.01, 0.01].
+  # 6. HWC -> CHW, for the IMAGE only (`field: image`) — the mask must stay a
+  #    plain [H, W] int map. The pixels are already float32 from step 5.
   - !class:recordstream.ops.torch.ToTensor
     field: image
-    normalize: false
 
 # The dataset exposes `train` and `test` (no `validation`), so the held-out split
 # is `test`. The nested source needs the INSTANCE form — `!class:...()` WITH
