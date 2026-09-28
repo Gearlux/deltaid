@@ -1,0 +1,61 @@
+# The deltaid backend sweep — the MATRIX, declaratively.
+#
+#   matrainer sweep backends examples/sweep/sweep.yaml                 # frameworks × models, one tracker
+#   matrainer sweep backends examples/sweep/sweep.yaml --tracker csv   # …into the CSV backend
+#   matrainer sweep trackers examples/sweep/sweep.yaml                 # every tracker, one framework
+#   matrainer sweep all      examples/sweep/sweep.yaml                 # frameworks × models × trackers
+#   matrainer sweep backends examples/sweep/sweep.yaml --dry-run       # print the commands, run nothing
+#
+# This file is the PROJECT's half of the sweep — which cells exist, what each needs installed,
+# which model variants it runs, which row pins an engine. The MACHINERY (probing, one
+# subprocess per cell, experiment naming from the tracker, failure isolation, the report) is
+# matrainer's (`matrainer.sweep.runner`); each cell runs through the generic `matrainer train`.
+#
+# ELEVEN cells: the three torch backends twice (the smp zoo wrapper AND the shared 488,739-
+# parameter U-Net spec), the five non-torch engines on the spec, huggingface on its own Hub
+# checkpoint. Both gaps are structural — there is no non-torch segmentation zoo (smp is
+# torch-only, the observation `unet/spec.py` exists to answer), and huggingface takes no U-Net
+# (a `transformers.Trainer` drives models that compute their own loss from `labels=`).
+#
+# THE KERAS ROW PINS ITS ENGINE, and that is forced rather than preferred: on the torch engine
+# `keras.metrics.MeanIoU` scatters per PIXEL through a Python loop (~160 s per 8×224×224 batch
+# against a 0.37 s model step — measured), so an unpinned keras row does not look slow, it
+# looks HUNG. The pin also leaves the `keras` and `tensorflow` rows differing in exactly ONE
+# thing, the loop. Its `requires:` names BOTH keras and tensorflow for the same reason — the
+# pinned engine must actually be installed.
+
+config: all_backends.yaml
+epochs: 5
+
+frameworks:
+  - name: lightning
+    requires: [pytorch_lightning]
+    models: [zoo, unet]
+  - name: torch
+    models: [zoo, unet]
+  - name: fastai
+    models: [zoo, unet]
+  - name: keras
+    requires: [keras, tensorflow]
+    env: {KERAS_BACKEND: tensorflow}
+    models: [unet]
+  - name: tensorflow
+    models: [unet]
+  - name: huggingface
+    requires: [transformers]
+    models: [zoo]
+  - name: jax
+    requires: [flax]
+    models: [unet]
+  - name: mlx
+    models: [unet]
+
+models:
+  - name: zoo          # the config's default (SegmentationModelPytorch) — appends no flag
+  - name: unet         # the shared U-Net spec, reachable via the example's `!scope:model=unet`
+    flags: [--model, unet]
+
+trackers: [mlflow, csv]
+
+tracker_setup:
+  mlflow: [aisland, mlflow, start]
