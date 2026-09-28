@@ -57,7 +57,7 @@ def _target_masks(n: int = 2) -> torch.Tensor:
     """
     from recordstream import batch_tensor
 
-    return cast(torch.Tensor, batch_tensor(collate_records(_records(n)), "mask", dtype=torch.int64))
+    return batch_tensor(collate_records(_records(n)), "mask", dtype=torch.int64)
 
 
 def _segmenter(**kwargs: Any) -> LightningSegmenter:

@@ -191,12 +191,12 @@ class TestWhatTheEngineChanges:
         import deltaid.tensorflow_segmenter as module
 
         original = module.keras_backend
-        module.keras_backend = lambda: "torch"  # type: ignore[assignment]
+        module.keras_backend = lambda: "torch"
         try:
             with pytest.raises(RuntimeError, match="KERAS_BACKEND"):
                 module.TensorFlowSegmenter._require_tensorflow_backend()
         finally:
-            module.keras_backend = original  # type: ignore[assignment]
+            module.keras_backend = original
 
     def test_each_split_gets_its_OWN_metric_objects(self) -> None:
         """A Keras metric is STATEFUL, so sharing one instance across splits would fold the

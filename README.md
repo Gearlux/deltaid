@@ -13,7 +13,7 @@ Each segmenter reads like a textbook example for its framework: no framework of 
 between.
 
 ```bash
-pip install 'git+https://github.com/Gearlux/deltaid.git@main#egg=deltaid[lightning]'
+pip install "deltaid[lightning]"
 # or: deltaid[torch] / [fastai] / [keras] / [tensorflow] / [huggingface] / [jax] / [mlx]
 
 deltaid train    examples/train_unet_oxford_pets.yaml
@@ -26,6 +26,9 @@ recordstream run examples/train_unet_oxford_pets.yaml   # the generic runner, no
 The core install is **backend-free**: `pip install deltaid` gives you the CLI and the config
 surface, and a training framework arrives with the backend you select (`deltaid[lightning]`). Every
 backend-owned name resolves lazily, so `import deltaid` pulls in no ML framework at all.
+
+deltaid is on PyPI as a pre-release; pip installs it without `--pre`, because no final release
+exists yet. Leave `--pre` off: it lets pip take pre-releases of *every* dependency too.
 
 ## The example: Oxford-IIIT Pet
 
@@ -525,9 +528,9 @@ tracking library. Deltaid is the segmenter, the model wrapper, and the registrat
 
 | | |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | Decision records — why each mechanism exists |
-| [AGENTS.md](AGENTS.md) | The agent-facing rulebook (invariants an agent must obey) |
-| [TASKS.md](TASKS.md) | Backlog |
+| [docs/architecture.md](https://github.com/Gearlux/deltaid/blob/main/docs/architecture.md) | Decision records — why each mechanism exists |
+| [AGENTS.md](https://github.com/Gearlux/deltaid/blob/main/AGENTS.md) | The agent-facing rulebook (invariants an agent must obey) |
+| [TASKS.md](https://github.com/Gearlux/deltaid/blob/main/TASKS.md) | Backlog |
 
 ## What the run record says about the model
 

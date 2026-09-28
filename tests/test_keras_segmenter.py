@@ -156,14 +156,15 @@ class TestWhatTheEngineChanges:
 
         seen: List[str] = []
         original_backend, original_warning = module.keras_backend, module.logger.warning
-        module.keras_backend = lambda: "torch"  # type: ignore[assignment]
-        module.logger.warning = lambda msg, *a, **k: seen.append(str(msg))  # type: ignore[assignment]
+        module.keras_backend = lambda: "torch"
+        module.logger.warning = lambda msg, *a, **k: seen.append(str(msg))  # type: ignore[method-assign]
         try:
             _segmenter()._check_compiled_metrics(
                 [keras.metrics.MeanIoU(num_classes=3), keras.metrics.SparseCategoricalAccuracy()]
             )
         finally:
-            module.keras_backend, module.logger.warning = original_backend, original_warning  # type: ignore[assignment]
+            module.keras_backend = original_backend
+            module.logger.warning = original_warning  # type: ignore[method-assign]
 
         assert len(seen) == 1 and "MeanIoU" in seen[0]
         assert "KERAS_BACKEND=tensorflow" in seen[0], "a warning without the fix is just noise"
@@ -174,14 +175,15 @@ class TestWhatTheEngineChanges:
 
         seen: List[str] = []
         original_backend, original_warning = module.keras_backend, module.logger.warning
-        module.logger.warning = lambda msg, *a, **k: seen.append(str(msg))  # type: ignore[assignment]
+        module.logger.warning = lambda msg, *a, **k: seen.append(str(msg))  # type: ignore[method-assign]
         try:
-            module.keras_backend = lambda: "tensorflow"  # type: ignore[assignment]
+            module.keras_backend = lambda: "tensorflow"
             _segmenter()._check_compiled_metrics([keras.metrics.MeanIoU(num_classes=3)])
-            module.keras_backend = lambda: "torch"  # type: ignore[assignment]
+            module.keras_backend = lambda: "torch"
             _segmenter()._check_compiled_metrics([keras.metrics.SparseCategoricalAccuracy()])
         finally:
-            module.keras_backend, module.logger.warning = original_backend, original_warning  # type: ignore[assignment]
+            module.keras_backend = original_backend
+            module.logger.warning = original_warning  # type: ignore[method-assign]
 
         assert seen == []
 
