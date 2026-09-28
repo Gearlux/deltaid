@@ -255,7 +255,7 @@ def _upsample_logits(logits: np.ndarray, size: Any) -> np.ndarray:
     if tuple(logits.shape[-2:]) == tuple(size):
         return logits
     resized = F.interpolate(torch.as_tensor(logits), size=tuple(size), mode="bilinear", align_corners=False)
-    return cast(np.ndarray, resized.numpy())
+    return resized.numpy()
 
 
 #: Metric NAMES this backend resolves — derived from the split's CONFUSION MATRIX.

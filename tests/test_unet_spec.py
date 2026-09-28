@@ -49,7 +49,7 @@ requires_every_engine = pytest.mark.skipif(
 def _tiny(**kwargs: object) -> TorchUNet:
     params: dict = {"num_classes": 3}
     params.update(kwargs)
-    return TorchUNet(**params)  # type: ignore[arg-type]
+    return TorchUNet(**params)
 
 
 # --------------------------------------------------------------------------- #

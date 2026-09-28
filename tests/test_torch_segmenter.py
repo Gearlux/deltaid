@@ -255,7 +255,7 @@ class TestTheLoop:
         try:
             seg.run()
         finally:
-            torch.nn.utils.clip_grad_norm_ = original  # type: ignore[assignment]
+            torch.nn.utils.clip_grad_norm_ = original
         assert seen and set(seen) == {0.5}
 
     def test_test_writes_a_metrics_sidecar(self, tmp_path: Path) -> None:

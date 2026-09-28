@@ -33,7 +33,7 @@ second hand-written list.
   config restructure.
 - Because the type is closed, confluid's pydantic pass rejects a typo **at construction**, listing
   every valid value — earlier and more informative than smp's own `KeyError` several frames down.
-  Navigaitor's form-spec and StreamStudio render it as an enumerated widget rather than free text.
+  Form-spec generators and visual editors render it as an enumerated widget rather than free text.
 - A `Literal` cannot be built at runtime and still be a type, so the list is written out. That
   creates a drift risk in both directions: an smp release adding an architecture would leave it
   silently unofferable, and one removing an architecture would leave a choice that fails at build

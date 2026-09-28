@@ -19,7 +19,7 @@ def _tiny(**kwargs: object) -> SegmentationModelPytorch:
     """A model small enough to build in a test — no pretrained download."""
     params: dict = {"encoder_name": "resnet18", "encoder_weights": None, "num_classes": 3}
     params.update(kwargs)
-    return SegmentationModelPytorch(**params)  # type: ignore[arg-type]
+    return SegmentationModelPytorch(**params)
 
 
 # --------------------------------------------------------------------------- #
