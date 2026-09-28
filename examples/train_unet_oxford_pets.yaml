@@ -1,0 +1,473 @@
+# One segmentation config, every training backend — Oxford-IIIT Pet (the "MNIST of segmentation").
+#
+#   deltaid train    examples/train_unet_oxford_pets.yaml
+#   recordstream run examples/train_unet_oxford_pets.yaml   # generic runner, no verb
+#
+# ---------------------------------------------------------------------------
+# The shape of this file IS the demo
+# ---------------------------------------------------------------------------
+# Everything above the "framework-specific" divider is engine-agnostic: the
+# dataset, the preprocessing, the batch/epoch knobs, the run identity. Only the
+# keys below it change when the training engine does.
+#
+# Every backend is a `!scope:framework=<name>` block that OVERRIDES only the
+# framework-specific keys (document order, last write wins), and
+# `default_scopes:` names the one a bare run uses (lightning), so this config
+# runs as-is with no scope at all. `--framework <name>` picks another, and it is
+# the SAME flag on either runner:
+#
+#   deltaid train    examples/train_unet_oxford_pets.yaml --framework lightning
+#   recordstream run examples/train_unet_oxford_pets.yaml --framework lightning
+#
+# The name must match a block below. `--framework lightnin` is an ERROR listing
+# the backends this file declares, not a silent fall-through to the default.
+#
+# How it stays this small:
+#  * `deltaid.LightningSegmenter` bakes the loss (ignore_index CrossEntropy),
+#    the collate, the optimizer (AdamW) and the metrics (mean IoU / macro Dice),
+#    and turns the ergonomic knobs (batch_size / num_workers / max_epochs /
+#    trackers) into DataLoaders + a `pytorch_lightning.Trainer`.
+#  * Every top-level key is wired in by **Confluid broadcasting** — sibling keys
+#    inject into the same-named constructor params, no nesting or `!ref:`.
+#  * The model is `!lazy:` so `num_classes` is resolved at run time and injected
+#    by `initialize()` — never written here.
+
+# ===========================================================================
+# Shared — identical for every backend
+# ===========================================================================
+
+# The backend a bare `deltaid train` / `recordstream run` uses. A `--framework <name>`
+# wins over it; the value must name a block below (a typo is the same error a
+# typo'd flag gets); it is a static list — never a `${...}` value.
+default_scopes: [framework=lightning]
+
+experiment_name: oxford_pets_segmentation
+run_name: unet_resnet34_pets
+
+# ---------------------------------------------------------------------------
+# The dataset, and what its target actually looks like
+# ---------------------------------------------------------------------------
+# `dpdl-benchmark/oxford_iiit_pet` ships each row as an RGB photo plus a TRIMAP:
+# a greyscale PNG whose pixel values are class ids, `1` = the pet, `2` = the
+# background, `3` = the boundary ring around the animal. 3680 train / 3669 test.
+#
+# Two consequences the chain below encodes, and both are silent when wrong:
+#
+#  1. The trimap is 1-BASED. A per-pixel CrossEntropy over `num_classes=3`
+#     expects ids in [0, 2], so `3` would index past the head. `FormulaOp`
+#     shifts the whole map down by one -> 0 = pet, 1 = background, 2 = boundary.
+#  2. The image and the mask must be resized TOGETHER, by the same draw. A
+#     resize that treats them separately (or interpolates the mask) invents
+#     class ids that were never in the label scheme.
+#
+# Nothing here is segmentation-specific machinery: `ConvertToMask` is the only
+# op the task needed added, and the joint resize is a bare albumentations
+# transform that recordstream's op-family dispatch hands BOTH keys in one call.
+preprocess:
+  # 1. The trimap PNG -> an int64 [H, W] Mask under the key `mask`. `mask` is
+  #    albumentations' own key vocabulary, so step 4 finds it with no rename.
+  #    The source ships the column as a Label (it does not know it is a mask),
+  #    which is why the op reads through `item_value` rather than `item_data`.
+  - !class:recordstream.ops.image.ConvertToMask
+    field: segmentation_mask
+    output: mask
+
+  # 2. 1-based trimap -> 0-based class ids. A plain arithmetic op, not a knob on
+  #    ConvertToMask: remapping ids is something recordstream could already do.
+  - !class:recordstream.ops.formula.FormulaOp
+    field: mask
+    formula: a - 1
+
+  # 3. Drop the source column. A PIL image left in the record reaches
+  #    `collate_records`, which has no way to stack it.
+  - !class:recordstream.ops.structure.DropField
+    key: segmentation_mask
+
+  # 4. ONE joint draw over image AND mask — the resize the model's stride needs
+  #    (smp encoders want H and W divisible by 32; 224 is 7x32). albumentations
+  #    uses nearest-neighbour for masks, so no class id is ever interpolated.
+  - !class:albumentations.Resize
+    height: 224
+    width: 224
+
+  # 5. ImageNet mean/std — the statistics `encoder_weights: imagenet` was
+  #    trained under. An image-ONLY transform: the mask passes through untouched
+  #    (pinned by a test, because a Normalize reaching the mask would turn class
+  #    ids into floats silently).
+  - !class:albumentations.Normalize
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+
+  # 6. HWC -> CHW, for the IMAGE only (`field: image`) — the mask must stay a
+  #    plain [H, W] int map. The pixels are already float32 from step 5.
+  - !class:recordstream.ops.torch.ToTensor
+    field: image
+
+# The dataset exposes `train` and `test` (no `validation`), so the held-out split
+# is `test`. The nested source needs the INSTANCE form — `!class:...()` WITH
+# parens — or `Stream.source` stays a deferred Class marker and iteration raises.
+#
+# `count:` caps both splits for a fast smoke run; delete both lines to train on
+# all 3680 / 3669 rows.
+train_set: !class:recordstream.Stream
+  source: !class:recordstream.sources.huggingface.HuggingFaceSource()
+    path: dpdl-benchmark/oxford_iiit_pet
+    split: train
+    count: 256
+  ops: !ref:preprocess
+
+val_set: !class:recordstream.Stream
+  source: !class:recordstream.sources.huggingface.HuggingFaceSource()
+    path: dpdl-benchmark/oxford_iiit_pet
+    split: test
+    count: 64
+  ops: !ref:preprocess
+
+# 3 classes: pet / background / boundary. Stated explicitly because for
+# segmentation the count is a property of the LABEL SCHEME, not of the data —
+# omit it and the segmenter derives it by decoding every mask in the train split
+# (a full pass), which is also wrong for a class that appears in no training image.
+#
+# The alternative labelling, if you do not care about the boundary ring: keep
+# `num_classes: 3` and add `ignore_index: 2`, which drops those pixels from the
+# loss AND the metrics rather than scoring the model on an ambiguous band.
+num_classes: 3
+
+batch_size: 8
+num_workers: 4
+max_epochs: 5
+
+# ===========================================================================
+# Framework-specific — the ONLY part a backend swap touches
+# ===========================================================================
+# The `runnable:` lives in each framework block below; the keys HERE are the
+# torch-family defaults every block inherits unless it overrides them.
+#
+# EVERY framework-specific key sits at THIS level — `model`, `metrics`,
+# `preprocess` — and a backend block overrides the ones it must. That
+# flatness is not cosmetic: a scope block replaces a KEY and takes its whole
+# subtree with it, so a `model:` nested INSIDE `runnable:` would vanish the
+# moment a block swapped the runnable. Keep every slot a sibling of the others
+# and a block can override one without erasing another.
+#
+# No `task:` anywhere on purpose. The segmenter's constructor already defaults to
+# `fit`, and every `deltaid <verb>` sets the task from the verb (train->fit,
+# evaluate->test, predict->predict), so a `task: fit` line would be dead in both
+# paths. Set `task:` only to change what a BARE `recordstream run` does.
+
+# `smp.create_model` behind one wrapper, so `arch:` is the whole difference
+# between U-Net, DeepLabV3+, FPN, PSPNet, SegFormer and seven more — the encoder
+# and its pretrained weights are chosen independently.
+#
+# `!lazy:` so `initialize()` can inject the resolved num_classes; the wrapper
+# also builds its backbone at that point rather than at config-load time, so a
+# config that is merely inspected downloads nothing.
+model: !lazy:deltaid.SegmentationModelPytorch
+  arch: unet
+  encoder_name: resnet34
+  encoder_weights: imagenet
+
+# --- the OTHER kind of model, on a dimension of its own ----------------------
+# `--model unet` swaps the zoo wrapper for deltaid's own shared spec, which the
+# five non-torch backends already train (their blocks below wire their native
+# implementation). This block is what makes it reachable from the THREE TORCH
+# backends too, so `lightning` / `torch` / `fastai` can run the same 488,739
+# parameters the other five do:
+#
+#   deltaid train examples/train_unet_oxford_pets.yaml --model unet
+#   deltaid train examples/train_unet_oxford_pets.yaml --model unet --framework torch
+#
+# It is a SECOND dimension rather than a second config, and it composes with
+# `--framework`: the sweep overlay (`examples/sweep/`) nests a block of the same
+# name inside each non-torch block, so `--framework mlx --model unet` reaches
+# `MlxUNet` instead of the `TorchUNet` below.
+#
+# Expect a WORSE score than the zoo wrapper, and that is the point rather than a
+# disappointment: a small net trained from scratch loses to a pretrained ResNet
+# encoder every time. This one is the control — the same architecture in five
+# vocabularies — not the recommendation.
+unet: !scope:model=unet
+  model: !lazy:deltaid.TorchUNet
+    # `(H, W, C)` — channels-LAST even though the torch tensor is NCHW, so ONE
+    # config line drives any of the five implementations. The value matches the
+    # joint resize above; it must stay divisible by 2 ** len(widths) = 8.
+    input_shape: [224, 224, 3]
+
+# The default — `default_scopes:` at the top of the file names it, so a bare
+# `deltaid train` runs this block and `--framework lightning` names the same one.
+# A typo'd `--framework lightnin` is an error listing the backends this file
+# declares — the check a backend SUBCOMMAND could never do.
+lightning: !scope:framework=lightning
+  runnable: !class:deltaid.LightningSegmenter
+
+# --- torch: the control experiment ------------------------------------------
+# The SMALLEST block in the file, and that is the point. This backend removes the
+# training FRAMEWORK entirely — the loop is written out, `zero_grad`/`backward`/
+# `step` in the open — and the config still does not change: same dataset, same
+# preprocess chain, same model, same losses, same metrics, same artifacts. If a
+# knob only worked because Lightning implemented it, it shows up here.
+#
+# What it does NOT have is honest rather than missing: no `lightning:` Trainer
+# slot and no framework loggers (tracking goes through `trackers:`, which every
+# backend has), no callback protocol, no distributed strategy. Multi-GPU is out
+# of scope deliberately — that is what Lightning is for.
+torch: !scope:framework=torch
+  runnable: !class:deltaid.TorchSegmenter
+    # Knobs the other backends have no equivalent for: an explicit device (an
+    # explicit value is taken at its word, so a CPU-vs-GPU comparison cannot
+    # silently fall back), and a plain state_dict checkpoint — there is no
+    # framework format to write.
+    device: auto
+
+# --- fastai: swap the LOOP and nothing else ---------------------------------
+# fastai runs on torch, so it reuses the same model, the same batch shape and the
+# same collate; what it brings is one-cycle scheduling and its own metric
+# vocabulary. The block overrides `runnable` and `metrics` and NOTHING else.
+#
+# `metrics:` MUST be restated here, and that is not a style choice: the shared
+# `metrics:` key above is a torchmetrics TEMPLATE MAPPING, which a fastai Learner
+# cannot consume. fastai metrics are NAMES resolved against `fastai.metrics`
+# (`DiceMulti` and `JaccardCoeffMulti` are the per-pixel pair, both already
+# defaulting to axis=1). Leaving it inherited would hand the Learner a dict.
+fastai: !scope:framework=fastai
+  runnable: !class:deltaid.FastaiSegmenter
+    one_cycle: true
+    learning_rate: 0.001
+  metrics:
+    - DiceMulti
+    - JaccardCoeffMulti
+
+# --- keras: the first backend that is not torch -----------------------------
+# Two blocks below share ONE difference from every torch backend, and it is about
+# the ENGINE rather than the task: **Keras is channels-LAST**. So the preprocess
+# chain for a Keras run is the shared one MINUS its final step — `ToTensor` turns
+# HWC into CHW, which is exactly the layout Keras does not want. The mask needs no
+# such change: a class-id map is [H, W] in every engine.
+#
+# `preprocess:` is overridden here rather than in `train_set`, and that is what
+# makes the split definitions above reusable: both splits reach it through
+# `ops: !ref:preprocess`, and `!ref:` resolves against the MERGED document, so one
+# override moves train and validation together and they cannot drift.
+#
+# The model is deltaid's own `KerasUNet` — there is no Keras segmentation zoo to
+# wrap (`keras.applications` ships classification backbones only), which is the
+# same honest answer `deltaid/unet/` exists for: it implements the shared spec, so
+# a cross-framework comparison compares FRAMEWORKS rather than four networks.
+# `input_shape` is [H, W, C] here — the same order as in `TorchUNet`, whose tensor
+# is NCHW; the KNOB is spec-shaped so one config line drives any implementation.
+keras: !scope:framework=keras
+  runnable: !class:deltaid.KerasSegmenter
+  model: !lazy:deltaid.KerasUNet
+    input_shape: [224, 224, 3]
+  preprocess:
+    - !class:recordstream.ops.image.ConvertToMask
+      field: segmentation_mask
+      output: mask
+    - !class:recordstream.ops.formula.FormulaOp
+      field: mask
+      formula: a - 1
+    - !class:recordstream.ops.structure.DropField
+      key: segmentation_mask
+    - !class:albumentations.Resize
+      height: 224
+      width: 224
+    - !class:albumentations.Normalize
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+  # Loss and metrics stay unset on purpose: `initialize()` picks
+  # `SparseCategoricalCrossentropy(from_logits=True)` + MeanIoU/accuracy sized from
+  # num_classes, so "not chosen" stays distinguishable from "chosen". To say it
+  # yourself, pick from the registered `keras.losses` / `keras.metrics` set
+  # (deltaid/keras_segmentation.py) — and note that `from_logits: true` is NOT
+  # optional: the head is a bare 1x1 conv, and Keras's default normalizes raw
+  # logits by the row sum instead of raising (measured: 4.6293 vs the correct
+  # 1.4546 on the same batch).
+  #
+  #   loss: !class:keras.losses.SparseCategoricalCrossentropy
+  #     from_logits: true
+  #   metrics:
+  #     - !class:keras.metrics.MeanIoU
+  #       num_classes: 3
+  #       sparse_y_pred: false      # raw logits, not an argmax — without it, a shape error
+  #       name: mean_iou
+  #
+  # Keras compiles ONE metric list for the whole run, so this engine computes the
+  # UNION of `metrics` / `train_metrics` / `val_metrics` / `test_metrics` and
+  # reports it on both splits. A val-only metric is widened, never dropped.
+  #
+  # callbacks:
+  #   - !class:keras.callbacks.EarlyStopping { patience: 3 }
+  #   - !class:keras.callbacks.CSVLogger { filename: ./runs/keras_logs/history.csv }
+
+# --- tensorflow: the same channels-last data, a native loop -----------------
+# The fair question this block answers: why, when `KERAS_BACKEND=tensorflow
+# deltaid train --framework keras` already runs the identical config? Because
+# `tf.data`, `tf.GradientTape` under `@tf.function` (which is what makes
+# `jit_compile` a knob at all) and the SavedModel export are TensorFlow's and not
+# Keras's. Everything else — the data, the losses, the metrics — IS Keras 3, which
+# is also why `--framework tensorflow` imports deltaid.keras_segmentation and
+# there is no second loss module.
+#
+# `TensorFlowUNet` is the same spec again in raw `tf.nn` ops — no Keras layers at
+# all — so this backend's model is TF-native the way its loop is. Swap in
+# `!lazy:deltaid.KerasUNet` to keep the loop and change only the model.
+tensorflow: !scope:framework=tensorflow
+  runnable: !class:deltaid.TensorFlowSegmenter
+    # TensorFlow-only knobs, none of which the other backends have an equivalent for.
+    jit_compile: false             # XLA on the step functions
+    prefetch: true                 # tf.data's AUTOTUNE overlap
+    # export_dir: ./runs/exported/oxford_pets_unet   # a SavedModel, written after fit()
+  model: !lazy:deltaid.TensorFlowUNet
+    input_shape: [224, 224, 3]
+  preprocess:
+    - !class:recordstream.ops.image.ConvertToMask
+      field: segmentation_mask
+      output: mask
+    - !class:recordstream.ops.formula.FormulaOp
+      field: mask
+      formula: a - 1
+    - !class:recordstream.ops.structure.DropField
+      key: segmentation_mask
+    - !class:albumentations.Resize
+      height: 224
+      width: 224
+    - !class:albumentations.Normalize
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+
+# --- huggingface: fine-tuning a Hub checkpoint ------------------------------
+# The only backend that swaps the MODEL as well as the loop, so its block needs a
+# `model:` of its own. What it does NOT need is a `loss:` — an
+# `AutoModelForSemanticSegmentation` computes its own from `labels=`, which is why
+# this backend registers nothing at all for a config to wire.
+#
+# It keeps the TOP-LEVEL preprocess chain unchanged: transformers is torch, so it
+# wants the same CHW float tensor, and SegFormer's own preprocessor uses the same
+# ImageNet statistics already set above.
+#
+# Two SegFormer facts the runnable handles so the config does not have to: the
+# logits come back at 1/4 resolution ([N, C, 56, 56] for a 224 input) and are
+# upsampled before any metric or sink sees them; and the model's ignore index is a
+# CONFIG value defaulting to 255, not torch's -100, so the segmenter writes its own
+# `ignore_index` onto `config.semantic_loss_ignore_index`.
+huggingface: !scope:framework=huggingface
+  runnable: !class:deltaid.HuggingFaceSegmenter
+    learning_rate: 0.00006      # transformers' fine-tuning default — two orders below a
+                                # from-scratch LR, because we start from real weights
+    metrics: [mean_iou, pixel_accuracy]
+    # SegFormer's BACKWARD pass does not run on Apple's MPS accelerator, which `Trainer` picks
+    # by itself on Apple silicon: the run dies one step in with *"view size is not compatible
+    # with input tensor's size and stride"* out of `torch.autograd`. Measured directly on the
+    # checkpoint below — identical forward+backward, `loss=1.1024` on CPU, that error on MPS —
+    # so it is torch/MPS's limit on the model's own attention reshape and nothing this project
+    # can fix. **Delete this line on a CUDA box**, where the GPU is both faster and correct.
+    training_arguments: !lazy:transformers.TrainingArguments
+      use_cpu: true
+  model: !lazy:deltaid.HuggingFaceSegmentationModel
+    model_name: nvidia/segformer-b0-finetuned-ade-512-512
+    pretrained: true
+
+# --- jax: the loop written out, and jitted ----------------------------------
+# The closest sibling of the tensorflow block: both replace `fit()` with a traced
+# step function, and the differences between them are the differences between the
+# two programming models. `nnx.value_and_grad` differentiates a PURE FUNCTION of
+# (model, batch); `nnx.Optimizer` applies the update in place; the whole thing is
+# jitted ONCE and reused, because a fresh `jit` per epoch retraces the graph every
+# time and ends up slower than the eager loop it replaced.
+#
+# Channels-LAST like keras/tensorflow, so the same shortened preprocess chain.
+#
+# Losses, metrics and the optimizer are NAMES, not `!class:` tags: optax ships
+# plain FUNCTIONS and factories, so there is no class for a tag to resolve. That
+# is also why `--framework jax` imports no registrations module at all.
+jax: !scope:framework=jax
+  runnable: !class:deltaid.JaxSegmenter
+    learning_rate: 0.001
+    jit: true                       # turn OFF to read a traceback from inside a step
+    val_metrics: [mean_iou, pixel_accuracy, iou_per_class]
+  model: !lazy:deltaid.FlaxUNet
+    input_shape: [224, 224, 3]
+  preprocess:
+    - !class:recordstream.ops.image.ConvertToMask
+      field: segmentation_mask
+      output: mask
+    - !class:recordstream.ops.formula.FormulaOp
+      field: mask
+      formula: a - 1
+    - !class:recordstream.ops.structure.DropField
+      key: segmentation_mask
+    - !class:albumentations.Resize
+      height: 224
+      width: 224
+    - !class:albumentations.Normalize
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+
+# --- mlx: Apple silicon, unified memory -------------------------------------
+# The only backend whose batch path does genuinely LESS than the others: CPU and
+# GPU share memory, so there is no device transfer anywhere. What it costs
+# instead is `mx.eval` — MLX arrays are LAZY, and omitting the eval does not
+# raise, it grows the graph until memory runs out.
+#
+# `MlxUNet` is the fifth implementation of the shared spec, and the fifth to
+# report 488,739 parameters for 3 classes.
+mlx: !scope:framework=mlx
+  runnable: !class:deltaid.MlxSegmenter
+    learning_rate: 0.001
+    optimizer: Adam                 # a NAME: mlx.optimizers ships CLASSES (optax ships factories)
+    val_metrics: [mean_iou, pixel_accuracy, iou_per_class]
+  model: !lazy:deltaid.MlxUNet
+    input_shape: [224, 224, 3]
+  preprocess:
+    - !class:recordstream.ops.image.ConvertToMask
+      field: segmentation_mask
+      output: mask
+    - !class:recordstream.ops.formula.FormulaOp
+      field: mask
+      formula: a - 1
+    - !class:recordstream.ops.structure.DropField
+      key: segmentation_mask
+    - !class:albumentations.Resize
+      height: 224
+      width: 224
+    - !class:albumentations.Normalize
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+
+# ---------------------------------------------------------------------------
+# Metrics — the shared set, plus one that only validation computes
+# ---------------------------------------------------------------------------
+# `metrics:` is what EVERY split measures; `<split>_metrics:` is what that split
+# measures on top, merged over the shared set BY NAME (so a split adds to it
+# rather than restating it, and a same-named entry overrides).
+#
+# Left unset, `metrics:` defaults to mean IoU + macro Dice, sized from
+# num_classes. `val_metrics:` below adds the per-class breakdown on VALIDATION
+# only — `average: null` makes MulticlassJaccardIndex return one IoU per class,
+# which is the report a segmentation run actually wants and which costs nothing
+# extra to compute, since the metric is already accumulating the counts.
+#
+# A `[C]` VECTOR cannot go through Lightning's `log_dict` (its
+# `convert_tensors_to_scalars` raises on anything that is not one number), so it
+# is reported through the trackers' TEXT channel instead: a table sorted
+# WORST-CLASS-FIRST, printed to the log and logged to every wired tracker. Set
+# `plot_metrics: true` on the runnable to also get a bar chart (needs
+# `matrainer[plot]`). `class_names:` labels the rows — omit it and the classes are
+# numbered, which is readable but not informative.
+val_metrics:
+  iou_per_class: !lazy:torchmetrics.classification.MulticlassJaccardIndex
+    average: null
+
+class_names: [pet, background, boundary]
+
+# ---------------------------------------------------------------------------
+# Where the results go
+# ---------------------------------------------------------------------------
+# `trackers:` is the whole of a run's output wiring — there is no `logger:` slot.
+# Each tracker IS a metric sink (adapted to Lightning's logger interface), and
+# also receives the git provenance, the resolved config and the run manifest.
+#
+# trackers:
+#   - !class:matrainer.MlflowTracker
+#     experiment_name: oxford_pets_segmentation
+#   - !class:matrainer.TensorBoardTracker
