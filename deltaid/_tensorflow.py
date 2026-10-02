@@ -16,8 +16,9 @@ sorts ``_keras`` ahead of ``_tensorflow`` — importing keras one line before th
 supposed to steer it. Re-exporting here removes the ordering hazard instead of documenting it.
 
 ``setdefault``, not an assignment: an explicit ``KERAS_BACKEND=jax`` still wins, and
-``TensorFlowSegmenter.initialize()`` then fails with a message naming the mismatch instead of
-running on an engine its training loop cannot drive.
+``TensorFlowSegmenter.run()`` then refuses to start — its engine guard runs before ``initialize()``
+— with a message naming the mismatch instead of running on an engine its training loop cannot
+drive.
 
 :class:`~recordstream.keras.RecordSequence` is re-exported for the SAME reason as ``keras``, and
 it is not decoration: the default above lives in ``recordstream.keras``, so importing the batching

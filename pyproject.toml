@@ -193,7 +193,8 @@ deltaid = "deltaid.cli:app"
 # imports the module itself, and the CLI imports its own backend, so only navigaitor's pickers,
 # the form-specs and the StreamStudio palette go blind, by offering FEWER options.
 #
-# Naming: `deltaid-<backend>` for a runnable, `deltaid-<backend>-model` for a zoo wrapper,
+# Naming: `deltaid-<backend>` for a runnable, `deltaid-<library>-model` for a zoo wrapper
+# (`smp`, `huggingface`), `deltaid-<engine>-unet` for a shared-spec model,
 # `deltaid-<framework>-segmentation` for a loss/metric set. After changing this table, reinstall
 # the editable (`uv pip install -e ./deltaid --no-deps`) for the metadata to take effect.
 # `tests/test_entry_points.py` DERIVES the expectation from the tree, in both directions.

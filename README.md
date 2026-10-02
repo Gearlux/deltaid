@@ -9,8 +9,9 @@ One `runnable:` + `task:` YAML, three verbs, and a model slot that reaches every
 **HuggingFace `transformers`**, a jitted **JAX/optax** loop and Apple's **MLX** — and swapping
 between them is one flag, not one config.
 
-Each segmenter reads like a textbook example for its framework: no framework of our own sits in
-between.
+Each segmenter is a [matrainer](https://pypi.org/project/matrainer/) machinery base for its
+framework — the loop, the tracking, the task dispatch — plus the segmentation task hooks,
+written once and shared by all eight.
 
 ```bash
 pip install "deltaid[lightning]"
@@ -413,15 +414,23 @@ noise, and their agreement with each other is the point rather than their score.
 comparison:
 
 ```bash
-examples/sweep/run_sweep.sh                     # every installed backend, into MLflow
-examples/sweep/run_sweep.sh --tracker csv       # ...into the always-available CSV backend
-examples/sweep/run_sweep.sh --only jax,mlx      # just those two
-examples/sweep/run_sweep.sh --dry-run           # print the matrix and the commands, run nothing
+matrainer sweep backends examples/sweep/sweep.yaml                                  # every installed backend, into MLflow
+matrainer sweep backends examples/sweep/sweep.yaml --tracker csv --save-dir ./runs  # ...into the always-available CSV backend
+matrainer sweep backends examples/sweep/sweep.yaml --only jax,mlx                   # just those two
+matrainer sweep backends examples/sweep/sweep.yaml --dry-run                        # print the matrix and the commands, run nothing
 ```
+
+`examples/sweep/sweep.yaml` is the matrix (which backends, which model variants, which
+trackers); the machinery that walks it ships with [matrainer](https://pypi.org/project/matrainer/)
+(`matrainer sweep`). `--save-dir` is where the per-run `.log` files land
+(`<save-dir>/<experiment>/<run>.log`, default `./sweep_logs`) and where the file-backed trackers'
+reports are read from (`<save-dir>/csv/`), so a sweep into the `csv` tracker passes
+`--save-dir ./runs` — the directory the overlay's `csv` block writes under.
 
 Every run is the same `examples/sweep/all_backends.yaml` with two flags changed. That file is an
 **overlay**: it `include:`s the example above and adds only what a sweep needs — a `--tracker`
-dimension, one metric vocabulary, and the two blocks whose paths move under `sweep_logs/`.
+dimension, one metric vocabulary, and the two blocks (`tensorflow`, `huggingface`) whose output
+paths move under `runs/`.
 
 Eleven cells, because a backend is run once per model it can take:
 
@@ -436,7 +445,7 @@ observation the [shared spec](#models--a-zoo-wrapper-and-a-shared-spec) exists t
 huggingface takes no U-Net, because a `transformers.Trainer` drives models that compute their own
 loss from `labels=`.
 
-Two things the script does that are worth knowing:
+Two things the sweep does that are worth knowing:
 
 - **The keras row pins `KERAS_BACKEND=tensorflow`**, and that is forced rather than a preference:
   see the `MeanIoU` measurement below. It also makes the `keras` and `tensorflow` rows differ in
@@ -453,7 +462,7 @@ empty table. Timings, FLOP counts and Lightning's within-epoch `train/loss_step`
 away by default, named in the footer, and restored by `--all`:
 
 ```bash
-python -m matrainer.sweep report csv Wed_Aug_5_2026_1 --all
+matrainer sweep report csv Wed_Aug_5_2026_1 --save-dir ./runs --all
 ```
 
 Per-class vectors (`val/iou_per_class`) never reach the table at all — a `[C]` value cannot go

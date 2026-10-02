@@ -293,16 +293,17 @@ lacks.
 | the loop | `pl.Trainer` | written out | `Learner` |
 | callbacks | Trainer slot | **none** | `callbacks:` |
 | distributed | strategies | **none, deliberately** | fastai's own |
-| per-split metrics | train/val/test | train/val/test | **val/test only** |
+| per-split metrics | train/val/test | train/val/test | **the union** (record 13) |
 | config block size | (the default) | **the smallest in the file** | +`metrics:` |
 
 - **`torch` has no `lightning:` slot and no distributed strategy, and that is honest rather than
   missing.** Multi-GPU is what Lightning is for; a half-`Trainer` here would be a worse one. What
   it gains is that a knob which only worked *because* Lightning implemented it shows up
   immediately — and its config block being the smallest in the file is the evidence for the claim.
-- **`fastai` has no `train_metrics` slot**, because a `Learner` computes metrics on the validation
-  pass only. Offering the slot would accept a wired set and silently never call it — the exact
-  failure per-split slots exist to remove.
+- **`fastai` can only UNION its metric slots**, because a fitting `Learner` holds ONE metric list
+  and reports it on training and validation alike (record 13). A metric wired to `val_metrics` is
+  therefore computed on training too — the honest failure, where dropping it would be a wired
+  metric that silently reports nothing.
 - **`fastai` must restate `metrics:`**, because the shared key is a torchmetrics template *mapping*
   and a `Learner` cannot consume one. This is the general shape of a backend override: not "this
   backend prefers different metrics" but "this engine speaks a different metric vocabulary".
@@ -360,7 +361,7 @@ reason:
 | the model | `FlaxUNet` | `MlxUNet` |
 | loss / metrics / optimizer | **names**, not `!class:` tags | **names**, not `!class:` tags |
 | callbacks | a plain `(epoch, logs)` callable | a plain `(epoch, logs)` callable |
-| per-split metrics | val/test only | val/test only |
+| per-split metrics | train/val/test | train/val/test |
 | what it alone brings | the loop as a pure function | unified memory, no device transfer |
 
 - **Neither has a registrations module**, and unlike `huggingface` — where the reason is that the
@@ -368,7 +369,7 @@ reason:
   FUNCTIONS**. There is no class for a `!class:` tag to resolve or for confluid's registry to tag,
   so a loss is named (`"softmax_cross_entropy_with_integer_labels"`, `"cross_entropy"`). Three
   backends therefore have `registrations=None` for two genuinely different reasons, which is why
-  the field is `Optional[str]` rather than a boolean.
+  the field is nullable (`None` — nothing to register) rather than a boolean.
 - **Neither has a callback CLASS to name**, because neither framework ships a callback protocol —
   so `callbacks:` holds a plain callable invoked as `callback(epoch, logs)`. Spelling that
   signature out in the type alias is what makes the slot checkable at all.
@@ -605,17 +606,19 @@ The obvious way to get one is a second config with every backend written out. Th
 avoid: it duplicates the dataset, the trimap handling, the joint resize and every framework block,
 and the copy drifts from the example the moment either is edited.
 
-**Decision.** `examples/sweep/` is an OVERLAY plus a driver.
+**Decision.** `examples/sweep/` is an OVERLAY plus a MATRIX, walked by `matrainer sweep`.
 
 - `all_backends.yaml` `include:`s the example and overrides only what a sweep needs: a `tracker`
   dimension whose blocks take their names from the run through `!ref:`, one metric vocabulary, and
-  the two blocks whose output paths move under `sweep_logs/`.
+  the two blocks whose output paths move under `runs/` (the TensorFlow SavedModel export and the
+  HuggingFace `Trainer`'s `output_dir`).
 - The **model becomes a dimension**, `!scope:model=unet`, and that block lives in the EXAMPLE
   rather than here — making the shared spec reachable is worth having on a default checkout, not
   only under a sweep. It is what lets the three torch backends train the same 488,739 parameters
   the other five already do.
-- `run_sweep.sh` walks the eleven cells one SUBPROCESS at a time and isolates failures.
-- `matrainer.sweep` names the experiment `<date>_<N>` — N counted from the TRACKER — and renders
+- `sweep.yaml` declares the matrix — the eleven cells, the trackers, and the keras row's engine
+  pin — and `matrainer sweep` walks it one SUBPROCESS at a time and isolates failures.
+- That same command names the experiment `<date>_<N>` — N counted from the TRACKER — and renders
   the runs back. It is matrainer's rather than this project's: both halves are queries against a
   tracker, and three task projects held byte-identical copies before the lift.
 
@@ -630,7 +633,7 @@ and the copy drifts from the example the moment either is edited.
   runnable's constructor kwargs, where a broadcast cannot reach it. (3) The five non-torch blocks
   need no nested `unet:` block: each wires its implementation unconditionally and is spliced after
   the example's top-level one.
-- **The keras row pins `KERAS_BACKEND=tensorflow`**, and record 9's neighbour is why: on the torch
+- **The keras row pins `KERAS_BACKEND=tensorflow`** (its `env:` in `sweep.yaml`), and record 9's neighbour is why: on the torch
   engine `keras.metrics.MeanIoU` scatters per PIXEL through a Python loop (~160 s per batch against
   a 0.37 s model step), so an unpinned keras row does not look slow, it looks hung. Pinning also
   leaves the `keras` and `tensorflow` rows differing in exactly one thing, the loop.
@@ -649,7 +652,7 @@ and the copy drifts from the example the moment either is edited.
 **Example.**
 
 ```bash
-examples/sweep/run_sweep.sh --tracker csv --epochs 1
+matrainer sweep backends examples/sweep/sweep.yaml --tracker csv --save-dir ./runs --epochs 1
 # ==> lightning_zoo    ok   (56s)
 # ==> lightning_unet   ok   (62s)
 # ...
@@ -671,10 +674,10 @@ csv: !scope:tracker=csv
 ```
 
 **What you may change.** A ninth backend adds a row to `MATRIX` in `tests/test_sweep_config.py`
-(which asserts the matrix covers every backend the CLI advertises) and an entry to `BACKENDS` in
-the driver, naming its import probes and any environment it must pin. Wire an engine-specific
-metric when you want to look at THAT backend; leave it out when you want to compare backends — the
-REPORT renders the union either way, and a column one engine fills is honest where a silently
+(which asserts the matrix covers every backend the CLI advertises) and a `frameworks:` row in
+`examples/sweep/sweep.yaml`, naming its `requires:` import probes and any `env:` it must pin.
+Wire an engine-specific metric when you want to look at THAT backend; leave it out when you want
+to compare backends — the REPORT renders the union either way, and a column one engine fills is honest where a silently
 dropped one is not. Do NOT resolve a ragged column by making the report hide it.
 
 ## 13. Every split is scored, and where that is not free (2026-08-05)
