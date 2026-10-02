@@ -870,3 +870,119 @@ to inject the width BEFORE the flow (a deferred spec U-Net cannot build without 
 (`_build_trainer` / `_live_trackers` / `_run_eval` / `_report_epoch_metrics`) — extend through
 the hooks, or change the base in matrainer with every consumer updated in the same workspace
 change.
+
+---
+
+## 16. Every model with a random build is seeded when it is built (2026-08-09)
+
+**Context.** The sweep (record 12) reruns identical configs, and some rows moved between runs.
+The `keras_unet` row read mean IoU 0.3039, 0.3863 and 0.3183 across three sweeps of the same
+config: `KerasUNet` was the one U-Net implementation without a `seed`, while its four siblings
+already had one. Then the zoo rows moved too, on a refresh of the same matrix:
+
+| row | val mean IoU, run 1 | run 2 |
+|---|---|---|
+| `fastai_zoo` | 0.7455 | 0.7271 |
+| `huggingface_zoo` | 0.5619 | 0.6112 |
+| `lightning_zoo` | 0.7416 | 0.7383 |
+| `torch_zoo` | 0.7520 | 0.7405 |
+
+The smp decoder is always a fresh random init (the encoder too, with `encoder_weights: null`).
+A Hub pretrained load still reinitializes the `num_labels` head at random, and
+`TrainingArguments.seed` applies only when training starts, too late to cover the build.
+
+**Decision.** Every model whose build draws random numbers takes `seed` and applies it at BUILD
+time, in its framework's own idiom, without restoring the RNG afterwards:
+
+| class | how it seeds |
+|---|---|
+| `TorchUNet` · `SegmentationModelPytorch` · `HuggingFaceSegmentationModel` | `torch.manual_seed` before the build |
+| `KerasUNet` | `keras.utils.set_random_seed` before the build (Keras has no per-layer seed) |
+| `FlaxUNet` | its own `nnx.Rngs(seed)` |
+| `MlxUNet` | `mx.random.seed` before the build |
+| `TensorFlowUNet` | `tf.random.stateless_uniform` per weight (record 9) |
+
+**Consequences.**
+
+- **The seed sits on the wrapper, not the segmenter.** A segmenter-side seed would have to go in
+  an `initialize` override, and record 15's fleet rule forbids a concrete on a shared base from
+  shadowing `initialize`. transformers' own default (42) keeps seeding the Hub backend's data
+  order, so the two draws are both deterministic even though they are two values.
+- **Not restored.** This is a run-level seed applied at the earliest useful moment, so the loader
+  shuffle is covered as well.
+- **Reruns now match.** Verified 2026-08-08 and 2026-08-09:
+  - the keras cell is byte-identical across reruns and across the csv and mlflow trackers
+    (`val/mean_iou` 0.4298437833786011), together with the tracking library's same-day
+    `shuffle=False` fix;
+  - the torch zoo cell is byte-identical across paired five-epoch runs on MPS (`metrics.csv` diff
+    empty);
+  - the huggingface zoo cell matches exactly (`val/mean_iou` 0.5406759738922119) except the
+    wall-clock columns, which no seed can pin.
+- **A new knob makes generated examples stale.** Adding `seed` changed the constructor that a
+  discovery service generates its segmentation example from, and that example was regenerated in
+  the same change.
+
+**Example.**
+
+```yaml
+model: !lazy:deltaid.SegmentationModelPytorch
+  arch: unet
+  encoder_name: resnet34
+  encoder_weights: imagenet
+  seed: 0        # torch.manual_seed before smp.create_model; the fresh decoder is reproducible
+```
+
+**What you may change.** You may add `seed` to a new model whose build draws random numbers,
+applied at build time in its framework's idiom. Do not restore the RNG after the build, and do
+not move the seed onto a segmenter through an `initialize` override. Pins:
+- `tests/test_smp_model.py::test_the_seed_actually_reproduces_the_weights`
+- `tests/test_huggingface_segmenter.py::TestTheModelWrapperSeedsItsBuild` (the seed comes before
+  both build branches)
+- `tests/test_unet_spec.py::TestKerasUNetMatchesTheSpec::test_the_seed_actually_reproduces_the_weights`
+- `tests/test_unet_spec.py::TestTorchUNet::test_the_seed_makes_the_weights_reproducible`
+
+---
+
+## 17. A run's output wiring is one constructor slot, `trackers:` (2026-08-02)
+
+**Context.** A run writes its metrics, its git provenance, its resolved config and its manifest,
+and Lightning additionally wants per-step metrics in a logger. Two slots for one concern would
+split those destinations.
+
+There was also a silent failure in the slot's shape. confluid broadcasts a LIST onto a slot only
+when the slot's ANNOTATION accepts a list. Declared as a post-construction attribute, a
+`trackers: [...]` key in YAML did nothing, while every unit test passed, because the tests set
+`.trackers` in Python.
+
+**Decision.** `trackers` is a constructor parameter on every backend, annotated
+`Optional[Union[Partial[Tracker], Iterable[Partial[Tracker]]]]`, and stored VERBATIM. The tracking
+library's `_live_trackers()` normalizes and flows it once at run time and writes the result back
+to the slot. Lightning receives each tracker adapted through `matrainer.lightning.TrackerLogger`,
+so its per-step metrics land in the same backends as the provenance and the manifest. There is no
+second output slot.
+
+**Consequences.**
+
+- Normalizing in `__init__` would iterate the value, and a deferred `Fluid` is not iterable.
+- Writing back is what makes a second flow harmless. Flowing a live object is a no-op, but a
+  `Fluid` flowed twice is built twice: two MLflow runs for one training run.
+- The slot is declared by the tracking library's `TrainerRunnable`, and each concrete backend
+  restates it in its own flat constructor, because that signature is what introspection reads
+  (record 15). `metric_names` is stored verbatim for the same reason: from YAML it arrives as a
+  deferred marker.
+
+**Example.**
+
+```yaml
+trackers:
+  - !class:matrainer.MlflowTracker { experiment_name: oxford_pets_segmentation }
+  - !class:matrainer.TensorBoardTracker
+```
+
+**What you may change.** You may add a tracker kind (that is the tracking library's work). Do not
+move `trackers` off the constructor, normalize it in `__init__`, or add a second output slot.
+Pins:
+- `tests/test_tracking_parity.py::test_trackers_is_a_constructor_param_on_every_backend`
+- `tests/test_tracking_parity.py::test_no_backend_has_a_logger_slot`
+- `tests/test_tracking_parity.py::test_every_backend_flows_its_trackers_once_and_writes_them_back`
+- `tests/test_lightning_segmenter.py::TestTrackers`
