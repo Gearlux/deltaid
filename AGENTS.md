@@ -33,7 +33,7 @@ Example config: `examples/train_unet_oxford_pets.yaml`. Sweep: `examples/sweep/`
 **Who owns what:** recordstream owns records, ops (`ConvertToMask`, the joint albumentations
 resize), collate, `batch_tensor`, `num_mask_classes` and the fork guards. matrainer owns the
 trainer machinery, CLI factory, tracking, metric naming/slots/functions and the sweep driver.
-waivefront owns region rasterization and signal-domain sinks. Never add a collate, mask op, batch
+A signal-domain project owns region rasterization and signal-domain sinks. Never add a collate, mask op, batch
 reader, remap knob on `ConvertToMask`, or CLI helper here. §3.
 
 ## Backends
