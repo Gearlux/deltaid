@@ -526,6 +526,14 @@ input tensor's size and stride"* out of `torch.autograd` — identical forward+b
 `loss=1.1024` on CPU. The example config therefore pins `use_cpu: true` in the huggingface block;
 delete that line on a CUDA box.
 
+## Environment variables
+
+Listed with defaults in [`env.complete`](https://github.com/Gearlux/deltaid/blob/main/env.complete).
+
+| variable | meaning |
+| --- | --- |
+| `KERAS_BACKEND` | `torch`, `tensorflow` or `jax` — the engine Keras runs on; `--framework tensorflow` pins `tensorflow` |
+
 ## What deltaid does not own
 
 The data plumbing belongs to the dataset engine — the record model, the ops, the collate and its
