@@ -24,6 +24,7 @@ Other modules:
   upstream losses and metrics.
 - Zoo wrappers: `smp_model.py` (`SegmentationModelPytorch`, twelve architectures),
   `huggingface_model.py` (`HuggingFaceSegmentationModel`).
+- `fno_model.py` (`FourierNeuralOperator`): a torch model that wraps nothing, any picture size. §18.
 - `unet/`: `spec.py` plus five implementations of one U-Net (torch, keras, tensorflow, flax, mlx).
 - `_keras.py` / `_tensorflow.py`: import shims. `cli.py`: the `FRAMEWORKS` table only, on
   `matrainer.cli`. `__init__.py`: lazy exports.
@@ -151,6 +152,9 @@ reader, remap knob on `ConvertToMask`, or CLI helper here. §3.
 - A model whose build draws random numbers takes `seed`, applied at BUILD time without restoring
   the RNG, on the wrapper rather than the segmenter. (`tests/test_smp_model.py::test_the_seed_actually_reproduces_the_weights`,
   `tests/test_huggingface_segmenter.py::TestTheModelWrapperSeedsItsBuild`, `TestKerasUNetMatchesTheSpec`) §16.
+- `FourierNeuralOperator` (`tests/test_fno_model.py`) §18: the build is cached in the public
+  submodule `net`; the forward stays TorchScript-compilable (no `typing.cast` in `_FNO` or
+  `_SpectralConv2d`); a picture smaller than the modes uses the lowest ones it has.
 - `unet/` (`tests/test_unet_spec.py`) §6:
   - `__init__.py` imports nothing; `spec.py` only the standard library.
   - Every implementation is checked against `spec.trainable_parameter_count` and IS its

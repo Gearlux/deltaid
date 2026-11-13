@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning is
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Models
+- `FourierNeuralOperator` — a Fourier neural operator for any picture size (`width`, `modes`,
+  `layers`, `patch_size`, `local_kernel`), for the lightning, torch and fastai backends.
+
 ## [0.1.0a1] — 2026-09-28
 
 First public pre-release. The surface it ships:

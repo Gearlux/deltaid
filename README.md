@@ -99,6 +99,7 @@ Two kinds, and they answer different questions:
 | `SegmentationModelPytorch` | somebody else's weights (smp) | the zoo — `arch`, `encoder_name`, `encoder_weights` | the top level |
 | `HuggingFaceSegmentationModel` | somebody else's weights (the Hub) | the zoo — `model_name`, `pretrained` | the top level |
 | `TorchUNet` / `KerasUNet` / `TensorFlowUNet` / `FlaxUNet` / `MlxUNet` | **nothing** | the architecture — `widths`, `bottleneck_width`, `seed` | `deltaid/unet/` |
+| `FourierNeuralOperator` | **nothing** | frequencies — `width`, `modes`, `layers`, `patch_size`, `local_kernel` | the top level |
 
 For real work prefer a zoo wrapper: a small net trained from scratch loses to a pretrained encoder
 every time (in the table above, SegFormer-b0 reaches mIoU 0.659 where the from-scratch U-Nets reach
@@ -117,6 +118,24 @@ model: !lazy:deltaid.TorchUNet     # no pretrained weights — the comparison, n
 `TorchUNet` serves all three torch backends unchanged (they differ in the loop, not in what a model
 is), which is why there is no `fastai_unet.py`. `input_shape` is `(H, W, C)` in **every**
 implementation, even `TorchUNet`'s, whose tensor is NCHW — one config line drives any of them.
+
+## A Fourier neural operator — one model for any picture size
+
+`FourierNeuralOperator` learns its filters on the lowest `modes` frequencies of each layer's 2-D
+FFT, so its weights do not depend on the picture's size: no stride rule, and the same model runs on
+a crop and on the whole picture. It serves all three torch backends.
+
+```yaml
+model: !lazy:deltaid.FourierNeuralOperator
+  width: 48
+  modes: [24, 24]     # frequencies learned per axis
+  patch_size: 4       # the layers run on a 4x smaller grid; 1 = full resolution, far slower
+  local_kernel: 3     # the convolution beside each Fourier layer; 1 = the plain operator
+```
+
+Keeping only the low frequencies is a low-pass filter: wide regions are cheap, detail a few pixels
+across is not. Prefer a zoo wrapper where small detail matters
+([architecture §18](https://github.com/Gearlux/deltaid/blob/main/docs/architecture.md)).
 
 ## The zoo wrapper — one class, twelve architectures
 

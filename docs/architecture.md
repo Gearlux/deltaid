@@ -899,7 +899,7 @@ time, in its framework's own idiom, without restoring the RNG afterwards:
 
 | class | how it seeds |
 |---|---|
-| `TorchUNet` · `SegmentationModelPytorch` · `HuggingFaceSegmentationModel` | `torch.manual_seed` before the build |
+| `TorchUNet` · `SegmentationModelPytorch` · `HuggingFaceSegmentationModel` · `FourierNeuralOperator` | `torch.manual_seed` before the build |
 | `KerasUNet` | `keras.utils.set_random_seed` before the build (Keras has no per-layer seed) |
 | `FlaxUNet` | its own `nnx.Rngs(seed)` |
 | `MlxUNet` | `mx.random.seed` before the build |
@@ -989,3 +989,46 @@ Pins:
 - `tests/test_tracking_parity.py::test_no_backend_has_a_logger_slot`
 - `tests/test_tracking_parity.py::test_every_backend_flows_its_trackers_once_and_writes_them_back`
 - `tests/test_lightning_segmenter.py::TestTrackers`
+
+## 18. A Fourier neural operator beside the zoo (2026-11-13)
+
+**Context.** A Fourier neural operator (FNO, Li et al. 2021) learns its filters on frequencies:
+each layer multiplies the lowest `modes` frequencies of the picture's 2-D FFT by learned complex
+weights and adds a local convolution. Its weights do not depend on the picture's size, so one model
+runs at any resolution with no stride rule. It was tried on spectrogram foreground/background masks
+of radio recordings (96 recordings to train, 38 held out, one seed, 3000 steps of 512x512 crops),
+against smp's DeepLabV3+ on a pretrained resnet34:
+
+| | best mean IoU | final mean IoU | ms per 2048x512 picture (MPS) |
+|---|---|---|---|
+| DeepLabV3+ resnet34, pretrained | 0.843 | 0.792 | 90 |
+| FNO, `local_kernel: 1` | 0.786 | 0.754 | 20 |
+| FNO, `local_kernel: 3` | 0.797 | 0.763 | 22 |
+
+With the time axis resampled to 0.5x / 1x / 2x the rows, the FNO scored 0.755 / 0.754 / 0.754 and
+DeepLabV3+ 0.787 / 0.792 / 0.775. On long carriers the two were level; on bursts a few rows tall
+the FNO lost most of its foreground IoU, which is what a model keeping only the low frequencies
+predicts.
+
+**Decision.**
+- One class, `FourierNeuralOperator` (`deltaid/fno_model.py`), at the top level. It wraps no zoo
+  and is torch-only, so it is neither a zoo wrapper nor part of the `unet/` comparison (§6).
+- The lift is a strided convolution (`patch_size`, default 4): the layers run on a grid four times
+  smaller per side and the logits are upsampled back. A full-resolution operator (`patch_size: 1`)
+  over a 512x512 crop was too slow to train (over 20 s a step on CPU).
+- The weights are real tensors with a trailing `(re, im)` axis, so optimizers and devices that do
+  not handle complex parameters (MPS) train them. FFTs run in float32.
+- A picture smaller than the modes uses as many frequencies as it has — the weights of the lowest
+  ones — instead of failing.
+- The forward avoids `typing.cast`, so `torch.jit.script` compiles it; `torch.export` does too.
+  The legacy ONNX exporter does not support `rfft2`.
+
+**Consequences.** Prefer a zoo wrapper where small detail matters; the FNO is the choice where
+speed, or one model across picture sizes, matters more.
+
+**What you may change.** Add knobs; keep the build lazy (`net`, built by `solidify()`), the seed at
+build time (§16) and the forward scriptable. Pins:
+- `tests/test_fno_model.py::TestTheOutput::test_any_size_runs_with_the_same_weights`
+- `tests/test_fno_model.py::TestTheOutput::test_the_answer_follows_the_picture_when_it_is_resampled`
+- `tests/test_fno_model.py::TestDeployment`
+- `tests/test_fno_model.py::TestDiscoveryAndTraining::test_a_torch_segmenter_trains_it`
