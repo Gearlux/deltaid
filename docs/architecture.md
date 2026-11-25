@@ -293,16 +293,17 @@ lacks.
 | the loop | `pl.Trainer` | written out | `Learner` |
 | callbacks | Trainer slot | **none** | `callbacks:` |
 | distributed | strategies | **none, deliberately** | fastai's own |
-| per-split metrics | train/val/test | train/val/test | **val/test only** |
+| per-split metrics | train/val/test | train/val/test | **the union** (record 13) |
 | config block size | (the default) | **the smallest in the file** | +`metrics:` |
 
 - **`torch` has no `lightning:` slot and no distributed strategy, and that is honest rather than
   missing.** Multi-GPU is what Lightning is for; a half-`Trainer` here would be a worse one. What
   it gains is that a knob which only worked *because* Lightning implemented it shows up
   immediately — and its config block being the smallest in the file is the evidence for the claim.
-- **`fastai` has no `train_metrics` slot**, because a `Learner` computes metrics on the validation
-  pass only. Offering the slot would accept a wired set and silently never call it — the exact
-  failure per-split slots exist to remove.
+- **`fastai` can only UNION its metric slots**, because a fitting `Learner` holds ONE metric list
+  and reports it on training and validation alike (record 13). A metric wired to `val_metrics` is
+  therefore computed on training too — the honest failure, where dropping it would be a wired
+  metric that silently reports nothing.
 - **`fastai` must restate `metrics:`**, because the shared key is a torchmetrics template *mapping*
   and a `Learner` cannot consume one. This is the general shape of a backend override: not "this
   backend prefers different metrics" but "this engine speaks a different metric vocabulary".
@@ -360,7 +361,7 @@ reason:
 | the model | `FlaxUNet` | `MlxUNet` |
 | loss / metrics / optimizer | **names**, not `!class:` tags | **names**, not `!class:` tags |
 | callbacks | a plain `(epoch, logs)` callable | a plain `(epoch, logs)` callable |
-| per-split metrics | val/test only | val/test only |
+| per-split metrics | train/val/test | train/val/test |
 | what it alone brings | the loop as a pure function | unified memory, no device transfer |
 
 - **Neither has a registrations module**, and unlike `huggingface` — where the reason is that the
@@ -368,7 +369,7 @@ reason:
   FUNCTIONS**. There is no class for a `!class:` tag to resolve or for confluid's registry to tag,
   so a loss is named (`"softmax_cross_entropy_with_integer_labels"`, `"cross_entropy"`). Three
   backends therefore have `registrations=None` for two genuinely different reasons, which is why
-  the field is `Optional[str]` rather than a boolean.
+  the field is nullable (`None` — nothing to register) rather than a boolean.
 - **Neither has a callback CLASS to name**, because neither framework ships a callback protocol —
   so `callbacks:` holds a plain callable invoked as `callback(epoch, logs)`. Spelling that
   signature out in the type alias is what makes the slot checkable at all.
@@ -605,17 +606,19 @@ The obvious way to get one is a second config with every backend written out. Th
 avoid: it duplicates the dataset, the trimap handling, the joint resize and every framework block,
 and the copy drifts from the example the moment either is edited.
 
-**Decision.** `examples/sweep/` is an OVERLAY plus a driver.
+**Decision.** `examples/sweep/` is an OVERLAY plus a MATRIX, walked by `matrainer sweep`.
 
 - `all_backends.yaml` `include:`s the example and overrides only what a sweep needs: a `tracker`
   dimension whose blocks take their names from the run through `!ref:`, one metric vocabulary, and
-  the two blocks whose output paths move under `sweep_logs/`.
+  the two blocks whose output paths move under `runs/` (the TensorFlow SavedModel export and the
+  HuggingFace `Trainer`'s `output_dir`).
 - The **model becomes a dimension**, `!scope:model=unet`, and that block lives in the EXAMPLE
   rather than here — making the shared spec reachable is worth having on a default checkout, not
   only under a sweep. It is what lets the three torch backends train the same 488,739 parameters
   the other five already do.
-- `run_sweep.sh` walks the eleven cells one SUBPROCESS at a time and isolates failures.
-- `matrainer.sweep` names the experiment `<date>_<N>` — N counted from the TRACKER — and renders
+- `sweep.yaml` declares the matrix — the eleven cells, the trackers, and the keras row's engine
+  pin — and `matrainer sweep` walks it one SUBPROCESS at a time and isolates failures.
+- That same command names the experiment `<date>_<N>` — N counted from the TRACKER — and renders
   the runs back. It is matrainer's rather than this project's: both halves are queries against a
   tracker, and three task projects held byte-identical copies before the lift.
 
@@ -630,7 +633,7 @@ and the copy drifts from the example the moment either is edited.
   runnable's constructor kwargs, where a broadcast cannot reach it. (3) The five non-torch blocks
   need no nested `unet:` block: each wires its implementation unconditionally and is spliced after
   the example's top-level one.
-- **The keras row pins `KERAS_BACKEND=tensorflow`**, and record 9's neighbour is why: on the torch
+- **The keras row pins `KERAS_BACKEND=tensorflow`** (its `env:` in `sweep.yaml`), and record 9's neighbour is why: on the torch
   engine `keras.metrics.MeanIoU` scatters per PIXEL through a Python loop (~160 s per batch against
   a 0.37 s model step), so an unpinned keras row does not look slow, it looks hung. Pinning also
   leaves the `keras` and `tensorflow` rows differing in exactly one thing, the loop.
@@ -649,7 +652,7 @@ and the copy drifts from the example the moment either is edited.
 **Example.**
 
 ```bash
-examples/sweep/run_sweep.sh --tracker csv --epochs 1
+matrainer sweep backends examples/sweep/sweep.yaml --tracker csv --save-dir ./runs --epochs 1
 # ==> lightning_zoo    ok   (56s)
 # ==> lightning_unet   ok   (62s)
 # ...
@@ -671,10 +674,10 @@ csv: !scope:tracker=csv
 ```
 
 **What you may change.** A ninth backend adds a row to `MATRIX` in `tests/test_sweep_config.py`
-(which asserts the matrix covers every backend the CLI advertises) and an entry to `BACKENDS` in
-the driver, naming its import probes and any environment it must pin. Wire an engine-specific
-metric when you want to look at THAT backend; leave it out when you want to compare backends — the
-REPORT renders the union either way, and a column one engine fills is honest where a silently
+(which asserts the matrix covers every backend the CLI advertises) and a `frameworks:` row in
+`examples/sweep/sweep.yaml`, naming its `requires:` import probes and any `env:` it must pin.
+Wire an engine-specific metric when you want to look at THAT backend; leave it out when you want
+to compare backends — the REPORT renders the union either way, and a column one engine fills is honest where a silently
 dropped one is not. Do NOT resolve a ragged column by making the report hide it.
 
 ## 13. Every split is scored, and where that is not free (2026-08-05)
@@ -870,3 +873,162 @@ to inject the width BEFORE the flow (a deferred spec U-Net cannot build without 
 (`_build_trainer` / `_live_trackers` / `_run_eval` / `_report_epoch_metrics`) — extend through
 the hooks, or change the base in matrainer with every consumer updated in the same workspace
 change.
+
+---
+
+## 16. Every model with a random build is seeded when it is built (2026-08-09)
+
+**Context.** The sweep (record 12) reruns identical configs, and some rows moved between runs.
+The `keras_unet` row read mean IoU 0.3039, 0.3863 and 0.3183 across three sweeps of the same
+config: `KerasUNet` was the one U-Net implementation without a `seed`, while its four siblings
+already had one. Then the zoo rows moved too, on a refresh of the same matrix:
+
+| row | val mean IoU, run 1 | run 2 |
+|---|---|---|
+| `fastai_zoo` | 0.7455 | 0.7271 |
+| `huggingface_zoo` | 0.5619 | 0.6112 |
+| `lightning_zoo` | 0.7416 | 0.7383 |
+| `torch_zoo` | 0.7520 | 0.7405 |
+
+The smp decoder is always a fresh random init (the encoder too, with `encoder_weights: null`).
+A Hub pretrained load still reinitializes the `num_labels` head at random, and
+`TrainingArguments.seed` applies only when training starts, too late to cover the build.
+
+**Decision.** Every model whose build draws random numbers takes `seed` and applies it at BUILD
+time, in its framework's own idiom, without restoring the RNG afterwards:
+
+| class | how it seeds |
+|---|---|
+| `TorchUNet` · `SegmentationModelPytorch` · `HuggingFaceSegmentationModel` · `FourierNeuralOperator` | `torch.manual_seed` before the build |
+| `KerasUNet` | `keras.utils.set_random_seed` before the build (Keras has no per-layer seed) |
+| `FlaxUNet` | its own `nnx.Rngs(seed)` |
+| `MlxUNet` | `mx.random.seed` before the build |
+| `TensorFlowUNet` | `tf.random.stateless_uniform` per weight (record 9) |
+
+**Consequences.**
+
+- **The seed sits on the wrapper, not the segmenter.** A segmenter-side seed would have to go in
+  an `initialize` override, and record 15's fleet rule forbids a concrete on a shared base from
+  shadowing `initialize`. transformers' own default (42) keeps seeding the Hub backend's data
+  order, so the two draws are both deterministic even though they are two values.
+- **Not restored.** This is a run-level seed applied at the earliest useful moment, so the loader
+  shuffle is covered as well.
+- **Reruns now match.** Verified 2026-08-08 and 2026-08-09:
+  - the keras cell is byte-identical across reruns and across the csv and mlflow trackers
+    (`val/mean_iou` 0.4298437833786011), together with the tracking library's same-day
+    `shuffle=False` fix;
+  - the torch zoo cell is byte-identical across paired five-epoch runs on MPS (`metrics.csv` diff
+    empty);
+  - the huggingface zoo cell matches exactly (`val/mean_iou` 0.5406759738922119) except the
+    wall-clock columns, which no seed can pin.
+- **A new knob makes generated examples stale.** Adding `seed` changed the constructor that a
+  discovery service generates its segmentation example from, and that example was regenerated in
+  the same change.
+
+**Example.**
+
+```yaml
+model: !lazy:deltaid.SegmentationModelPytorch
+  arch: unet
+  encoder_name: resnet34
+  encoder_weights: imagenet
+  seed: 0        # torch.manual_seed before smp.create_model; the fresh decoder is reproducible
+```
+
+**What you may change.** You may add `seed` to a new model whose build draws random numbers,
+applied at build time in its framework's idiom. Do not restore the RNG after the build, and do
+not move the seed onto a segmenter through an `initialize` override. Pins:
+- `tests/test_smp_model.py::test_the_seed_actually_reproduces_the_weights`
+- `tests/test_huggingface_segmenter.py::TestTheModelWrapperSeedsItsBuild` (the seed comes before
+  both build branches)
+- `tests/test_unet_spec.py::TestKerasUNetMatchesTheSpec::test_the_seed_actually_reproduces_the_weights`
+- `tests/test_unet_spec.py::TestTorchUNet::test_the_seed_makes_the_weights_reproducible`
+
+---
+
+## 17. A run's output wiring is one constructor slot, `trackers:` (2026-08-02)
+
+**Context.** A run writes its metrics, its git provenance, its resolved config and its manifest,
+and Lightning additionally wants per-step metrics in a logger. Two slots for one concern would
+split those destinations.
+
+There was also a silent failure in the slot's shape. confluid broadcasts a LIST onto a slot only
+when the slot's ANNOTATION accepts a list. Declared as a post-construction attribute, a
+`trackers: [...]` key in YAML did nothing, while every unit test passed, because the tests set
+`.trackers` in Python.
+
+**Decision.** `trackers` is a constructor parameter on every backend, annotated
+`Optional[Union[Partial[Tracker], Iterable[Partial[Tracker]]]]`, and stored VERBATIM. The tracking
+library's `_live_trackers()` normalizes and flows it once at run time and writes the result back
+to the slot. Lightning receives each tracker adapted through `matrainer.lightning.TrackerLogger`,
+so its per-step metrics land in the same backends as the provenance and the manifest. There is no
+second output slot.
+
+**Consequences.**
+
+- Normalizing in `__init__` would iterate the value, and a deferred `Fluid` is not iterable.
+- Writing back is what makes a second flow harmless. Flowing a live object is a no-op, but a
+  `Fluid` flowed twice is built twice: two MLflow runs for one training run.
+- The slot is declared by the tracking library's `TrainerRunnable`, and each concrete backend
+  restates it in its own flat constructor, because that signature is what introspection reads
+  (record 15). `metric_names` is stored verbatim for the same reason: from YAML it arrives as a
+  deferred marker.
+
+**Example.**
+
+```yaml
+trackers:
+  - !class:matrainer.MlflowTracker { experiment_name: oxford_pets_segmentation }
+  - !class:matrainer.TensorBoardTracker
+```
+
+**What you may change.** You may add a tracker kind (that is the tracking library's work). Do not
+move `trackers` off the constructor, normalize it in `__init__`, or add a second output slot.
+Pins:
+- `tests/test_tracking_parity.py::test_trackers_is_a_constructor_param_on_every_backend`
+- `tests/test_tracking_parity.py::test_no_backend_has_a_logger_slot`
+- `tests/test_tracking_parity.py::test_every_backend_flows_its_trackers_once_and_writes_them_back`
+- `tests/test_lightning_segmenter.py::TestTrackers`
+
+## 18. A Fourier neural operator beside the zoo (2026-11-13)
+
+**Context.** A Fourier neural operator (FNO, Li et al. 2021) learns its filters on frequencies:
+each layer multiplies the lowest `modes` frequencies of the picture's 2-D FFT by learned complex
+weights and adds a local convolution. Its weights do not depend on the picture's size, so one model
+runs at any resolution with no stride rule. It was tried on spectrogram foreground/background masks
+of radio recordings (96 recordings to train, 38 held out, one seed, 3000 steps of 512x512 crops),
+against smp's DeepLabV3+ on a pretrained resnet34:
+
+| | best mean IoU | final mean IoU | ms per 2048x512 picture (MPS) |
+|---|---|---|---|
+| DeepLabV3+ resnet34, pretrained | 0.843 | 0.792 | 90 |
+| FNO, `local_kernel: 1` | 0.786 | 0.754 | 20 |
+| FNO, `local_kernel: 3` | 0.797 | 0.763 | 22 |
+
+With the time axis resampled to 0.5x / 1x / 2x the rows, the FNO scored 0.755 / 0.754 / 0.754 and
+DeepLabV3+ 0.787 / 0.792 / 0.775. On long carriers the two were level; on bursts a few rows tall
+the FNO lost most of its foreground IoU, which is what a model keeping only the low frequencies
+predicts.
+
+**Decision.**
+- One class, `FourierNeuralOperator` (`deltaid/fno_model.py`), at the top level. It wraps no zoo
+  and is torch-only, so it is neither a zoo wrapper nor part of the `unet/` comparison (§6).
+- The lift is a strided convolution (`patch_size`, default 4): the layers run on a grid four times
+  smaller per side and the logits are upsampled back. A full-resolution operator (`patch_size: 1`)
+  over a 512x512 crop was too slow to train (over 20 s a step on CPU).
+- The weights are real tensors with a trailing `(re, im)` axis, so optimizers and devices that do
+  not handle complex parameters (MPS) train them. FFTs run in float32.
+- A picture smaller than the modes uses as many frequencies as it has — the weights of the lowest
+  ones — instead of failing.
+- The forward avoids `typing.cast`, so `torch.jit.script` compiles it; `torch.export` does too.
+  The legacy ONNX exporter does not support `rfft2`.
+
+**Consequences.** Prefer a zoo wrapper where small detail matters; the FNO is the choice where
+speed, or one model across picture sizes, matters more.
+
+**What you may change.** Add knobs; keep the build lazy (`net`, built by `solidify()`), the seed at
+build time (§16) and the forward scriptable. Pins:
+- `tests/test_fno_model.py::TestTheOutput::test_any_size_runs_with_the_same_weights`
+- `tests/test_fno_model.py::TestTheOutput::test_the_answer_follows_the_picture_when_it_is_resampled`
+- `tests/test_fno_model.py::TestDeployment`
+- `tests/test_fno_model.py::TestDiscoveryAndTraining::test_a_torch_segmenter_trains_it`

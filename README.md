@@ -9,8 +9,9 @@ One `runnable:` + `task:` YAML, three verbs, and a model slot that reaches every
 **HuggingFace `transformers`**, a jitted **JAX/optax** loop and Apple's **MLX** — and swapping
 between them is one flag, not one config.
 
-Each segmenter reads like a textbook example for its framework: no framework of our own sits in
-between.
+Each segmenter is a [matrainer](https://pypi.org/project/matrainer/) machinery base for its
+framework — the loop, the tracking, the task dispatch — plus the segmentation task hooks,
+written once and shared by all eight.
 
 ```bash
 pip install "deltaid[lightning]"
@@ -98,6 +99,7 @@ Two kinds, and they answer different questions:
 | `SegmentationModelPytorch` | somebody else's weights (smp) | the zoo — `arch`, `encoder_name`, `encoder_weights` | the top level |
 | `HuggingFaceSegmentationModel` | somebody else's weights (the Hub) | the zoo — `model_name`, `pretrained` | the top level |
 | `TorchUNet` / `KerasUNet` / `TensorFlowUNet` / `FlaxUNet` / `MlxUNet` | **nothing** | the architecture — `widths`, `bottleneck_width`, `seed` | `deltaid/unet/` |
+| `FourierNeuralOperator` | **nothing** | frequencies — `width`, `modes`, `layers`, `patch_size`, `local_kernel` | the top level |
 
 For real work prefer a zoo wrapper: a small net trained from scratch loses to a pretrained encoder
 every time (in the table above, SegFormer-b0 reaches mIoU 0.659 where the from-scratch U-Nets reach
@@ -116,6 +118,24 @@ model: !lazy:deltaid.TorchUNet     # no pretrained weights — the comparison, n
 `TorchUNet` serves all three torch backends unchanged (they differ in the loop, not in what a model
 is), which is why there is no `fastai_unet.py`. `input_shape` is `(H, W, C)` in **every**
 implementation, even `TorchUNet`'s, whose tensor is NCHW — one config line drives any of them.
+
+## A Fourier neural operator — one model for any picture size
+
+`FourierNeuralOperator` learns its filters on the lowest `modes` frequencies of each layer's 2-D
+FFT, so its weights do not depend on the picture's size: no stride rule, and the same model runs on
+a crop and on the whole picture. It serves all three torch backends.
+
+```yaml
+model: !lazy:deltaid.FourierNeuralOperator
+  width: 48
+  modes: [24, 24]     # frequencies learned per axis
+  patch_size: 4       # the layers run on a 4x smaller grid; 1 = full resolution, far slower
+  local_kernel: 3     # the convolution beside each Fourier layer; 1 = the plain operator
+```
+
+Keeping only the low frequencies is a low-pass filter: wide regions are cheap, detail a few pixels
+across is not. Prefer a zoo wrapper where small detail matters
+([architecture §18](https://github.com/Gearlux/deltaid/blob/main/docs/architecture.md)).
 
 ## The zoo wrapper — one class, twelve architectures
 
@@ -413,15 +433,23 @@ noise, and their agreement with each other is the point rather than their score.
 comparison:
 
 ```bash
-examples/sweep/run_sweep.sh                     # every installed backend, into MLflow
-examples/sweep/run_sweep.sh --tracker csv       # ...into the always-available CSV backend
-examples/sweep/run_sweep.sh --only jax,mlx      # just those two
-examples/sweep/run_sweep.sh --dry-run           # print the matrix and the commands, run nothing
+matrainer sweep backends examples/sweep/sweep.yaml                                  # every installed backend, into MLflow
+matrainer sweep backends examples/sweep/sweep.yaml --tracker csv --save-dir ./runs  # ...into the always-available CSV backend
+matrainer sweep backends examples/sweep/sweep.yaml --only jax,mlx                   # just those two
+matrainer sweep backends examples/sweep/sweep.yaml --dry-run                        # print the matrix and the commands, run nothing
 ```
+
+`examples/sweep/sweep.yaml` is the matrix (which backends, which model variants, which
+trackers); the machinery that walks it ships with [matrainer](https://pypi.org/project/matrainer/)
+(`matrainer sweep`). `--save-dir` is where the per-run `.log` files land
+(`<save-dir>/<experiment>/<run>.log`, default `./sweep_logs`) and where the file-backed trackers'
+reports are read from (`<save-dir>/csv/`), so a sweep into the `csv` tracker passes
+`--save-dir ./runs` — the directory the overlay's `csv` block writes under.
 
 Every run is the same `examples/sweep/all_backends.yaml` with two flags changed. That file is an
 **overlay**: it `include:`s the example above and adds only what a sweep needs — a `--tracker`
-dimension, one metric vocabulary, and the two blocks whose paths move under `sweep_logs/`.
+dimension, one metric vocabulary, and the two blocks (`tensorflow`, `huggingface`) whose output
+paths move under `runs/`.
 
 Eleven cells, because a backend is run once per model it can take:
 
@@ -436,7 +464,7 @@ observation the [shared spec](#models--a-zoo-wrapper-and-a-shared-spec) exists t
 huggingface takes no U-Net, because a `transformers.Trainer` drives models that compute their own
 loss from `labels=`.
 
-Two things the script does that are worth knowing:
+Two things the sweep does that are worth knowing:
 
 - **The keras row pins `KERAS_BACKEND=tensorflow`**, and that is forced rather than a preference:
   see the `MeanIoU` measurement below. It also makes the `keras` and `tensorflow` rows differ in
@@ -453,7 +481,7 @@ empty table. Timings, FLOP counts and Lightning's within-epoch `train/loss_step`
 away by default, named in the footer, and restored by `--all`:
 
 ```bash
-python -m matrainer.sweep report csv Wed_Aug_5_2026_1 --all
+matrainer sweep report csv Wed_Aug_5_2026_1 --save-dir ./runs --all
 ```
 
 Per-class vectors (`val/iou_per_class`) never reach the table at all — a `[C]` value cannot go
@@ -517,6 +545,14 @@ input tensor's size and stride"* out of `torch.autograd` — identical forward+b
 `loss=1.1024` on CPU. The example config therefore pins `use_cpu: true` in the huggingface block;
 delete that line on a CUDA box.
 
+## Environment variables
+
+Listed with defaults in [`env.complete`](https://github.com/Gearlux/deltaid/blob/main/env.complete).
+
+| variable | meaning |
+| --- | --- |
+| `KERAS_BACKEND` | `torch`, `tensorflow` or `jax` — the engine Keras runs on; `--framework tensorflow` pins `tensorflow` |
+
 ## What deltaid does not own
 
 The data plumbing belongs to the dataset engine — the record model, the ops, the collate and its
@@ -552,3 +588,7 @@ already in the manifest's `params`.
 Reading the identity is free and never builds the model: the properties consult stored
 configuration only. Adding one to your own wrapper is a single `model_refs` property — see
 [matrainer's `uri` module](https://github.com/Gearlux/matrainer).
+
+## License
+
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) (the `LICENSE` file): free for personal, academic and other noncommercial use. Commercial use needs a separate licence from the author.

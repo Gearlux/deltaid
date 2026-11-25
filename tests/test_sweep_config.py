@@ -37,7 +37,8 @@ import pytest
 
 SWEEP = Path(__file__).resolve().parent.parent / "examples" / "sweep" / "all_backends.yaml"
 
-#: (backend, variant) -> (runnable class, model class). The matrix the driver script walks.
+#: (backend, variant) -> (runnable class, model class). The matrix `examples/sweep/sweep.yaml` declares
+#: and `matrainer sweep` walks.
 #: A variant an engine structurally cannot have is simply absent: there is no non-torch
 #: segmentation ZOO to wrap (smp is torch-only, which is why the shared spec exists), and a
 #: `transformers.Trainer` drives models that compute their own loss, so it takes no U-Net.

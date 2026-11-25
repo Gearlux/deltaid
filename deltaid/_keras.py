@@ -7,8 +7,9 @@ imported, and that something must sit in the lowest layer — ``recordstream.ker
 import sorters put a third-party import above a first-party one: a shim here would sort BELOW
 ``from recordstream.keras import RecordSequence`` and lose the race.
 
-This module therefore adds nothing but a name. Every deltaid module writes
-``from deltaid._keras import keras`` and never ``import keras`` directly.
+This module therefore adds nothing but a name. A deltaid module reaches keras through either
+``from deltaid._keras import keras`` or ``from recordstream.keras import keras`` — the same
+object — and never ``import keras`` directly.
 """
 
 from recordstream.keras import keras, keras_backend

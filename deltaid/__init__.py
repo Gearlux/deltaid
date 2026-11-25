@@ -42,6 +42,9 @@ _BACKEND_NAMES = {
     "MlxSegmenter": ("deltaid.mlx_segmenter", "mlx"),
     "SegmentationModelPytorch": ("deltaid.smp_model", "torch"),
     "HuggingFaceSegmentationModel": ("deltaid.huggingface_model", "huggingface"),
+    # A model that wraps nothing and is torch-only: neither a zoo wrapper nor part of the `unet/`
+    # comparison, so it stands at the top level beside the zoo.
+    "FourierNeuralOperator": ("deltaid.fno_model", "torch"),
     # The shared spec's implementations. `TorchUNet` serves EVERY torch backend (lightning, torch,
     # fastai — they differ in the loop, not in what a model is), which is why there is no separate
     # name per backend. Its extra is the SMALLEST one that supplies what it needs — plain `torch`,

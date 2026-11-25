@@ -238,8 +238,8 @@ class SegmentationModelPytorch(nn.Module):
         ``SegmentationModel.check_input_shape``, against the ENCODER's actual ``output_stride``
         and with the padded size to use in the message. A hardcoded ``% 32`` here — which this
         wrapper's DeepLabV3+-only predecessor had — is wrong twice over: it rejects valid input
-        for the architectures that set ``requires_divisible_input_shape = False`` (SegFormer, DPT),
-        and it would not track an encoder whose stride is not 32.
+        for the architecture that sets ``requires_divisible_input_shape = False`` (``Unet``,
+        which pads internally), and it would not track an encoder whose stride is not 32.
         """
         if images.dim() != 4:
             raise ValueError(
