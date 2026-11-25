@@ -257,7 +257,7 @@ class FourierNeuralOperator(nn.Module):
             )
             if self.checkpoint_path:
                 load_lightning_checkpoint(self, self.checkpoint_path, strict=self.checkpoint_strict)
-        return cast(nn.Module, self.net)
+        return self.net
 
     @property
     def backbone(self) -> nn.Module:
