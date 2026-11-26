@@ -339,7 +339,7 @@ class TestParity:
 
     def test_the_terminal_call_is_the_one_that_ends_the_run(self) -> None:
         source = inspect.getsource(FastaiSegmenter.fit)
-        assert "capture_log_file" in source
+        assert "ending_the_run(" in source
         assert ".finalize(" not in source
 
     def test_the_entrypoint_markers_are_the_dispatch_table(self) -> None:

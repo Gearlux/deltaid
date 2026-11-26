@@ -293,7 +293,7 @@ class TestTheSharedContract:
         `running` and matrainer's atexit hook labels a successful run `interrupted`."""
         source = inspect.getsource(HuggingFaceSegmenter.fit)
         assert "log_run_context" in source
-        assert "capture_log_file" in source
+        assert "ending_the_run(" in source
         assert ".finalize(" not in source
 
 
