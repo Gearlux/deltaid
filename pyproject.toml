@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deltaid"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Semantic segmentation across training backends, driven by one config (smp models)."
 readme = "README.md"
 authors = [{name = "Gert Behiels"}]
