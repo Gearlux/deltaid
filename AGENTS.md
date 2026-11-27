@@ -7,7 +7,7 @@ usage is in the [README](README.md). Root `AGENTS.md` rules are not repeated her
 
 Semantic segmentation on eight backends, all driven by one config: `lightning`, `torch` (a
 hand-written loop), `fastai`, `keras`, `tensorflow`, `huggingface`, `jax`, `mlx`. On PyPI as
-pre-release `0.1.0a1`; the repo is private.
+pre-release `0.1.0aN` (the version in `pyproject.toml`); the repo is public.
 
 Each runnable `<backend>_segmenter.py` = task hooks (here) + a matrainer machinery base + its own
 full flat `__init__`:
@@ -169,7 +169,7 @@ reader, remap knob on `ConvertToMask`, or CLI helper here. §3.
 
 - `pip install deltaid` installs no framework; every backend name is lazy through
   `_BACKEND_NAMES`. Keep it in step with the extras *(unpinned beyond the release smoke test)*.
-- Releases go through the hand-written `release.yml` from a private repo. Each release raises
+- Releases go through the hand-written `release.yml` from the public repo. Each release raises
   every workspace floor, core and extras, to the newest release and runs the suite there, and a dependent's next
   release raises its `deltaid>=` the same way (user choice 2026-11-26; aisland `tests/test_workspace_dependency_specs.py`
   checks each is satisfiable); README links are
