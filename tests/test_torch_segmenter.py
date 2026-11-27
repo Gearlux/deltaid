@@ -207,10 +207,10 @@ class TestTheSharedContract:
         assert "def _log_run_context" not in source
 
     def test_the_terminal_call_is_the_one_that_ends_the_run(self) -> None:
-        """`capture_log_file` finalizes every tracker — a backend calling `finalize` itself would
+        """matrainer's `ending_the_run` finalizes every tracker — a backend calling `finalize` itself would
         be an eighth place for the tracker's status to disagree with the manifest's."""
         source = inspect.getsource(TorchSegmenter.fit)
-        assert "capture_log_file" in source
+        assert "ending_the_run(" in source
         assert ".finalize(" not in source
 
 

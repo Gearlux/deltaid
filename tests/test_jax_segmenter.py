@@ -267,7 +267,7 @@ class TestTheSharedContract:
 
     def test_a_function_driven_backend_finishes_its_own_manifest(self) -> None:
         source = inspect.getsource(JaxSegmenter.fit)
-        assert "log_run_context" in source and "capture_log_file" in source
+        assert "log_run_context" in source and "ending_the_run(" in source
         assert ".finalize(" not in source
 
 

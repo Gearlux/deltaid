@@ -169,8 +169,10 @@ reader, remap knob on `ConvertToMask`, or CLI helper here. §3.
 
 - `pip install deltaid` installs no framework; every backend name is lazy through
   `_BACKEND_NAMES`. Keep it in step with the extras *(unpinned beyond the release smoke test)*.
-- Releases go through the hand-written `release.yml` from a private repo. Workspace specs on
-  deltaid read `>=0.1.0a1` (aisland `tests/test_workspace_dependency_specs.py`); README links are
+- Releases go through the hand-written `release.yml` from a private repo. Each release raises
+  every workspace floor, core and extras, to the newest release and runs the suite there, and a dependent's next
+  release raises its `deltaid>=` the same way (user choice 2026-11-26; aisland `tests/test_workspace_dependency_specs.py`
+  checks each is satisfiable); README links are
   absolute GitHub URLs (`tests/test_docs_links.py`); the newest CHANGELOG entry is the declared
   version (`tests/test_packaging.py`).
 - CI runs `mypy .` here with only `[dev,torch,lightning,keras,huggingface,mlflow,tensorboard]`:
